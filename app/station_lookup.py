@@ -37,25 +37,29 @@ class StationLookupService:
         collected = []
         errors = []
         successful_requests = 0
+        lookup_queries = self._build_lookup_queries(query_clean)
 
-        for base_url in RADIO_BROWSER_BASE_URLS:
-            endpoint = (
-                f"{base_url}/json/stations/byname/{quote(query_clean)}"
-                f"?hidebroken=true&limit={RADIO_BROWSER_LOOKUP_LIMIT}&order=votes&reverse=true"
-            )
-            self._log(f"Sender-Suche gegen: {base_url}")
-            try:
-                request = Request(endpoint, headers={"User-Agent": USER_AGENT})
-                with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                    payload = json.load(response)
-            except Exception as err:
-                errors.append(f"{base_url}: {err}")
-                continue
+        for lookup_query in lookup_queries:
+            for base_url in RADIO_BROWSER_BASE_URLS:
+                endpoint = (
+                    f"{base_url}/json/stations/byname/{quote(lookup_query)}"
+                    f"?hidebroken=true&limit={RADIO_BROWSER_LOOKUP_LIMIT}&order=votes&reverse=true"
+                )
+                self._log(f"Sender-Suche gegen: {base_url} (query='{lookup_query}')")
+                try:
+                    request = Request(endpoint, headers={"User-Agent": USER_AGENT})
+                    with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                        payload = json.load(response)
+                except Exception as err:
+                    errors.append(f"{base_url} [{lookup_query}]: {err}")
+                    continue
 
-            successful_requests += 1
-            candidates = self._extract_candidates(payload)
-            if candidates:
-                collected.extend(candidates)
+                successful_requests += 1
+                candidates = self._extract_candidates(payload)
+                if candidates:
+                    collected.extend(candidates)
+                    break
+            if collected:
                 break
 
         if not collected:
@@ -206,6 +210,32 @@ class StationLookupService:
                 continue
             seen.add(clean)
             deduped.append(clean)
+        return deduped
+
+    def _build_lookup_queries(self, query: str) -> list[str]:
+        normalized = re.sub(r"\s+", " ", (query or "").strip())
+        if not normalized:
+            return []
+
+        variants = [normalized]
+        tokens = normalized.split()
+
+        # Relaxed fallbacks: progressively drop the trailing token.
+        # Example: "star fm maximum rock national" -> "... rock", "... maximum", ...
+        for end in range(len(tokens) - 1, 1, -1):
+            candidate = " ".join(tokens[:end]).strip()
+            if len(candidate) < 5:
+                continue
+            variants.append(candidate)
+
+        seen = set()
+        deduped = []
+        for variant in variants:
+            key = variant.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(variant)
         return deduped
 
     def _fetch_text(self, url: str) -> str:

@@ -14,6 +14,7 @@ from .config import (
     ALLOW_OFFICIAL_CHAIN_SOURCES,
     APP_NAME,
     DB_PATH,
+    EPG_SEARCH_DEFAULT_ENABLED,
     ORIGIN_ONLY_MODE,
     SONG_REFRESH_INTERVAL_SECONDS,
     UI_POLL_INTERVAL_MS,
@@ -56,6 +57,7 @@ class RadioToolApp:
         self.content_type_var = tk.StringVar(value="-")
         self.song_var = tk.StringVar(value="-")
         self.epg_var = tk.StringVar(value="-")
+        self.epg_enabled_var = tk.BooleanVar(value=EPG_SEARCH_DEFAULT_ENABLED)
         self.origin_mode_var = tk.StringVar(
             value=(
                 "Origin + offizielle Player-Kette aktiv"
@@ -75,6 +77,9 @@ class RadioToolApp:
         frame.pack(fill="both", expand=True)
 
         ttk.Label(frame, text="Sendername oder URL:").grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(frame, text="EPG-Suche aktiv", variable=self.epg_enabled_var).grid(
+            row=0, column=4, sticky="e"
+        )
         url_entry = ttk.Entry(frame, textvariable=self.url_var, width=105)
         url_entry.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(4, 8))
         url_entry.focus_set()
@@ -204,6 +209,10 @@ class RadioToolApp:
                 self._current_epg = payload
                 self.epg_var.set(payload.summary)
                 self._render_source_details()
+            elif event == "epg_disabled":
+                self._current_epg = None
+                self.epg_var.set("Deaktiviert (GUI-Schalter)")
+                self._render_source_details()
             elif event == "feed_candidates":
                 self._feed_candidates = payload
                 self._render_source_details()
@@ -232,7 +241,16 @@ class RadioToolApp:
         self.stop_button.configure(state="normal")
         self.status_var.set("Prüfe Stream...")
 
-        self._worker = threading.Thread(target=self._scan_worker, args=(value,), daemon=True)
+        if self.epg_enabled_var.get():
+            self.epg_var.set("Suche aktiv (wartet auf Ergebnis)")
+        else:
+            self.epg_var.set("Deaktiviert (GUI-Schalter)")
+
+        self._worker = threading.Thread(
+            target=self._scan_worker,
+            args=(value, bool(self.epg_enabled_var.get())),
+            daemon=True,
+        )
         self._worker.start()
 
     def _reset_state(self) -> None:
@@ -267,7 +285,7 @@ class RadioToolApp:
         self.logger.log("Verifizierte Quelle in DB gespeichert")
         messagebox.showinfo("Gespeichert", "Quelle wurde in der DB gespeichert/aktualisiert.")
 
-    def _scan_worker(self, value: str) -> None:
+    def _scan_worker(self, value: str, epg_enabled: bool) -> None:
         resolver = StreamResolver(self.logger.log)
         fetcher = SongMetadataFetcher(self.logger.log)
         lookup = StationLookupService(self.logger.log)
@@ -299,18 +317,22 @@ class RadioToolApp:
             self._results.put(("origin_domains", sorted(origin_domains)))
             self.logger.log(f"Origin-Domains: {', '.join(sorted(origin_domains)) or '-'}")
 
-            def epg_probe_worker() -> None:
-                try:
-                    epg = epg_service.fetch(
-                        resolved.resolved_url,
-                        homepage_url=station.homepage if station else "",
-                    )
-                    self.logger.log(f"EPG-Status: {epg.summary}")
-                    self._results.put(("epg", epg))
-                except Exception as epg_err:
-                    self.logger.log(f"EPG-Abfrage fehlgeschlagen: {epg_err}")
+            if epg_enabled:
+                def epg_probe_worker() -> None:
+                    try:
+                        epg = epg_service.fetch(
+                            resolved.resolved_url,
+                            homepage_url=station.homepage if station else "",
+                        )
+                        self.logger.log(f"EPG-Status: {epg.summary}")
+                        self._results.put(("epg", epg))
+                    except Exception as epg_err:
+                        self.logger.log(f"EPG-Abfrage fehlgeschlagen: {epg_err}")
 
-            threading.Thread(target=epg_probe_worker, daemon=True).start()
+                threading.Thread(target=epg_probe_worker, daemon=True).start()
+            else:
+                self.logger.log("EPG-Suche deaktiviert (GUI-Schalter).")
+                self._results.put(("epg_disabled", None))
 
             feed_candidates: list[str] = []
             preferred_feed_url = ""
@@ -461,6 +483,7 @@ class RadioToolApp:
         sections.append("### Eingabe/Status")
         sections.append(f"Sendername/URL Eingabe: {self.url_var.get().strip() or '-'}")
         sections.append(f"Aktueller Status: {self.status_var.get()}")
+        sections.append(f"EPG-Suche aktiv: {'ja' if self.epg_enabled_var.get() else 'nein'}")
         sections.append("")
 
         sections.append("### Sender-Lookup (Rohdaten)")
