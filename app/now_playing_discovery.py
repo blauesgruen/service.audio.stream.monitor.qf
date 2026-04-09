@@ -148,6 +148,7 @@ class NowPlayingDiscoveryService:
         return limited
 
     def fetch_now_playing(self, candidate_urls: list[str]) -> SongInfo | None:
+        partial_match: SongInfo | None = None
         for url in candidate_urls[:DISCOVERY_MAX_CANDIDATES]:
             request_url = self._cache_bust_url(url)
             text, content_type = self._fetch_text(request_url)
@@ -161,11 +162,19 @@ class NowPlayingDiscoveryService:
             if not song:
                 song = self._parse_xml_payload(text, url)
 
-            if song and (song.artist or song.title or song.stream_title):
+            if not song:
+                continue
+
+            if song.artist and song.title:
                 self._log(f"Now-Playing Treffer aus Feed: {url}")
                 return song
 
-        return None
+            if not partial_match and (song.artist or song.title or song.stream_title):
+                partial_match = song
+
+        if partial_match:
+            self._log(f"Now-Playing Fallback ohne vollständigen Artist+Title: {partial_match.source_url}")
+        return partial_match
 
     def _build_seed_urls(
         self,

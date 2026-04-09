@@ -8,7 +8,7 @@ import time
 import tkinter as tk
 from queue import Empty, Queue
 from tkinter import messagebox, ttk
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from .config import (
     ALLOW_OFFICIAL_CHAIN_SOURCES,
@@ -16,6 +16,7 @@ from .config import (
     DB_PATH,
     EPG_SEARCH_DEFAULT_ENABLED,
     ORIGIN_ONLY_MODE,
+    SONG_CLEAR_EMPTY_CYCLES,
     SONG_REFRESH_INTERVAL_SECONDS,
     UI_POLL_INTERVAL_MS,
 )
@@ -205,6 +206,11 @@ class RadioToolApp:
                 self.status_var.set("Songinfo aktualisiert")
                 self.save_button.configure(state="normal")
                 self._render_source_details()
+            elif event == "song_cleared":
+                self._current_song = None
+                self.song_var.set("-")
+                self.status_var.set("Aktuell kein Song verfÃ¼gbar")
+                self._render_source_details()
             elif event == "epg":
                 self._current_epg = payload
                 self.epg_var.set(payload.summary)
@@ -304,7 +310,24 @@ class RadioToolApp:
                 self._results.put(("station", station))
                 self.logger.log(f"Sendername auf Stream-URL aufgelöst: {stream_seed}")
 
-            resolved = resolver.resolve(stream_seed, original_input=value)
+            try:
+                resolved = resolver.resolve(stream_seed, original_input=value)
+            except HTTPError as http_err:
+                if http_err.code == 429 and station:
+                    self.logger.log(
+                        "Resolve wurde mit HTTP 429 gedrosselt; fahre mit Fallback-Seed fort "
+                        "(Feed-Discovery bleibt aktiv)."
+                    )
+                    resolved = ResolvedStream(
+                        input_url=value,
+                        resolved_url=stream_seed,
+                        delivery_url="",
+                        content_type="",
+                        was_playlist=False,
+                        station_name=station.name,
+                    )
+                else:
+                    raise
             if station:
                 resolved.station_name = station.name
 
@@ -445,9 +468,10 @@ class RadioToolApp:
                     reported_no_origin_song = False
                 else:
                     consecutive_no_song_cycles += 1
-                    if last_song_key and consecutive_no_song_cycles >= 2:
+                    if last_song_key and consecutive_no_song_cycles >= SONG_CLEAR_EMPTY_CYCLES:
                         self.logger.log("Songende erkannt: aktuell kein eindeutiger Song (Jingle/Beitrag/Nachrichten)")
                         last_song_key = ""
+                        self._results.put(("song_cleared", None))
 
                     if restricted_source_mode:
                         self.logger.log("Keine Quelle mit eindeutigem Artist in diesem Poll-Zyklus")
