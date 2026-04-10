@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from .config import REQUEST_TIMEOUT_SECONDS, STREAM_READ_BYTES, USER_AGENT
 from .models import SongInfo
+from .utils import has_unicode_letter, normalize_for_token_search
 
 
 class MetadataError(Exception):
@@ -133,7 +134,7 @@ class SongMetadataFetcher:
         title_lower = title.lower()
 
         # Ignore ID-like payloads such as "281085 - 393065".
-        if not re.search(r"[a-z]", artist_lower):
+        if not has_unicode_letter(artist_lower):
             return False
         if (
             re.fullmatch(r"[0-9][0-9 _.-]{2,}", artist_lower)
@@ -170,5 +171,5 @@ class SongMetadataFetcher:
         return True
 
     def _tokenize(self, value: str) -> set[str]:
-        cleaned = re.sub(r"[^a-z0-9]+", " ", (value or "").lower())
+        cleaned = normalize_for_token_search(value)
         return {token for token in cleaned.split() if len(token) >= 3}

@@ -92,7 +92,7 @@ Weiterhin ausgeschlossen:
 
 - Verzeichnis-/Aggregator-Domains (z. B. `radio.*`, `radio-assets.com`).
 
-## Parsing von XML/JSON
+## Parsing von XML/JSON/HTML
 
 ### XML
 
@@ -105,6 +105,11 @@ Weiterhin ausgeschlossen:
 - rekursiver Walk durch Objekte/Listen
 - extrahiert analoge Feldnamen (`title/song/track`, `artist/author/interpret`, etc.)
 - Statusfelder analog zu XML
+
+### HTML
+
+- extrahiert Artist/Title aus semantischen Klassen (z. B. `interpret`, `artist`, `title`, `track`)
+- nur fuer URLs mit klaren Reload-/Now-Playing-Hinweisen (z. B. `SSI`, `module`, `box`)
 
 ## Frischepruefung der Songdaten
 

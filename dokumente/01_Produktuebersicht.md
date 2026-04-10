@@ -16,7 +16,7 @@ Das Tool analysiert Internetradio-Streams mit Fokus auf drei Fragen:
   - `Origin URL` (vom Sender verwaltete Quelle)
   - `Delivery URL` (technischer Auslieferungsknoten/CDN)
 - ICY-Metadaten-Auslese direkt aus dem Audio-Stream
-- Generische Discovery fuer Web-Feeds (XML/JSON), ohne sender-spezifische Hardcodes
+- Generische Discovery fuer Web-Feeds (XML/JSON/HTML), ohne sender-spezifische Hardcodes
 - Discovery bleibt aktiv, auch wenn ICY keinen verwertbaren Songtitel liefert
 - Generische Pruefung typischer Icecast/Shoutcast-Status-Endpunkte (`status-json.xsl`, `status.xsl`, `stats`)
 - Origin-Only-Modus zur Einschränkung auf Sender-Domains bzw. offiziell verlinkte Zusatz-Domains
@@ -31,7 +31,7 @@ Das Tool analysiert Internetradio-Streams mit Fokus auf drei Fragen:
 - `Delivery URL`: das konkrete Redirect-Ziel (haeufig mit kurzlebigen Token).
 - `Songquelle`: die Quelle, aus der `artist` und `title` final stammen.
 - `stream_icy`: Songdaten direkt aus dem Stream-Metadatenkanal.
-- `web_feed_xml` / `web_feed_json`: Songdaten aus externer XML-/JSON-Quelle.
+- `web_feed_xml` / `web_feed_json` / `web_feed_html`: Songdaten aus externer Feed-Quelle.
 
 ## Nicht-Ziele
 

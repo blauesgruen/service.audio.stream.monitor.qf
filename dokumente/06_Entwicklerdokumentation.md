@@ -21,7 +21,7 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
 - `app/metadata.py`
   - Stream-ICY -> SongInfo
 - `app/now_playing_discovery.py`
-  - Web-Discovery + XML/JSON Parsing -> SongInfo
+  - Web-Discovery + XML/JSON/HTML Parsing -> SongInfo
 - `app/epg_service.py`
   - EPG Probe -> EpgInfo
 - `app/database.py`
@@ -66,10 +66,10 @@ Kommunikation Worker -> UI erfolgt ausschliesslich ueber `self._results` Queue.
 ### `SongInfo`
 
 - `stream_title`: Gesamtanzeige
-- `raw_metadata`: Rohpayload (ICY/XML/JSON)
+- `raw_metadata`: Rohpayload (ICY/XML/JSON/HTML)
 - `artist`: eindeutiger Artist, falls erkannt
 - `title`: eindeutiger Titel, falls erkannt
-- `source_kind`: `stream_icy`, `web_feed_xml`, `web_feed_json`
+- `source_kind`: `stream_icy`, `web_feed_xml`, `web_feed_json`, `web_feed_html`
 - `source_url`: Quelle der Songdaten
 - `source_approval`: `origin`, `official_player_chain` oder leer
 - `source_headers`: Header-Snapshot (typisch ICY/HTTP)
@@ -95,6 +95,7 @@ Radio-Browser Match inkl. `raw_record` fuer Rohdatenanzeige.
 Wichtig:
 
 - nutzt mehrere Radio-Browser Mirrors (`RADIO_BROWSER_BASE_URLS`)
+- erzeugt Lookup- und Slug-Varianten aus generischen Token-Fenstern (keine sender-festen Regeln)
 - dedupliziert und scored Kandidaten
 - Web-Fallback prueft mehrere Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`)
 

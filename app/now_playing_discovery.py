@@ -20,16 +20,19 @@ from .config import (
     MAX_NOWPLAYING_AGE_MINUTES,
     NOWPLAYING_DURATION_GRACE_SECONDS,
     NOWPLAYING_CANDIDATE_KEYWORDS,
+    NOWPLAYING_QUERY_CONTEXT_IGNORE_TOKENS,
     USER_AGENT,
 )
 from .models import ResolvedStream, SongInfo, StationMatch
-from .utils import get_base_domain, is_probable_url
+from .utils import get_base_domain, is_mixed_alnum_token, is_probable_url, split_search_tokens
 
 TITLE_KEYS = {"title", "song", "track", "tracktitle", "songtitle", "songname", "trackname", "name"}
 ARTIST_KEYS = {"artist", "author", "interpret", "performer", "band", "artistname"}
 STATUS_KEYS = {"status", "state", "playstate", "onair", "current", "isplaying"}
 TIME_KEYS = {"starttime", "start", "timestamp", "time", "date", "datetime"}
 DURATION_KEYS = {"duration", "length", "duration_sec", "duration_seconds", "runtime"}
+HTML_TITLE_CLASS_KEYS = ("js_title", "songtitle", "tracktitle", "title", "track", "song", "songname", "trackname")
+HTML_ARTIST_CLASS_KEYS = ("js_artist", "interpret", "artist", "artistname", "performer", "band", "author")
 
 
 class NowPlayingDiscoveryService:
@@ -43,6 +46,30 @@ class NowPlayingDiscoveryService:
 
     def get_linked_domains(self) -> set[str]:
         return set(self._linked_domains)
+
+    def filter_official_html_candidates(
+        self,
+        candidate_urls: list[str],
+        station: StationMatch | None,
+    ) -> list[str]:
+        station_base = get_base_domain(station.homepage) if station and station.homepage else ""
+        station_domain_matches = []
+        generic_html_matches = []
+        seen = set()
+        for url in candidate_urls:
+            if not self._looks_like_html_nowplaying_endpoint(url):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            candidate_base = get_base_domain(url)
+            generic_html_matches.append(url)
+            if station_base and candidate_base == station_base:
+                station_domain_matches.append(url)
+
+        if station_domain_matches:
+            return station_domain_matches
+        return generic_html_matches
 
     def discover_candidate_urls(
         self,
@@ -133,7 +160,28 @@ class NowPlayingDiscoveryService:
             candidates.add(feed_url)
             self._mark_trusted_candidate(feed_url)
 
-        ranked = sorted(candidates, key=self._candidate_score, reverse=True)
+        derived_html_candidates = set()
+        for candidate in list(candidates):
+            for derived in self._generate_html_nowplaying_variants(candidate):
+                if self._looks_like_feed_url(derived):
+                    derived_html_candidates.add(derived)
+        for derived in derived_html_candidates:
+            candidates.add(derived)
+            self._mark_trusted_candidate(derived)
+
+        normalized_candidates = self._dedupe_url_variants(candidates)
+        context_filtered_candidates = {
+            url
+            for url in normalized_candidates
+            if self._candidate_matches_input_context(url, resolved, station)
+        }
+        if context_filtered_candidates:
+            normalized_candidates = context_filtered_candidates
+        ranked = sorted(
+            normalized_candidates,
+            key=lambda url: self._candidate_score(url) + self._candidate_domain_preference(url, resolved, station),
+            reverse=True,
+        )
         limited = ranked[:DISCOVERY_MAX_CANDIDATES]
         self._trusted_candidates = {url for url in self._trusted_candidates if url in limited}
         self._linked_domains = {
@@ -150,7 +198,7 @@ class NowPlayingDiscoveryService:
     def fetch_now_playing(self, candidate_urls: list[str]) -> SongInfo | None:
         partial_match: SongInfo | None = None
         for url in candidate_urls[:DISCOVERY_MAX_CANDIDATES]:
-            request_url = self._cache_bust_url(url)
+            request_url = url if self._looks_like_html_nowplaying_endpoint(url) else self._cache_bust_url(url)
             text, content_type = self._fetch_text(request_url)
             if not text:
                 continue
@@ -161,6 +209,9 @@ class NowPlayingDiscoveryService:
 
             if not song:
                 song = self._parse_xml_payload(text, url)
+
+            if not song and self._looks_like_html_nowplaying_endpoint(url):
+                song = self._parse_html_payload(text, url)
 
             if not song:
                 continue
@@ -294,6 +345,33 @@ class NowPlayingDiscoveryService:
             else:
                 urls.add(urljoin(base_url, match))
 
+        for match in re.findall(
+            r"/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+(?:\.html|\.htm)(?:\?[^\"'\s<>()]+)?",
+            normalized_text,
+            flags=re.IGNORECASE,
+        ):
+            lower = match.lower()
+            if not any(
+                token in lower
+                for token in (
+                    "now",
+                    "onair",
+                    "current",
+                    "playlist",
+                    "track",
+                    "song",
+                    "titel",
+                    "title",
+                    "live",
+                    "radiomodul",
+                )
+            ):
+                continue
+            if match.startswith("/www."):
+                urls.add(f"https://{match.lstrip('/')}")
+            else:
+                urls.add(urljoin(base_url, match))
+
         # Generic CMS pattern: entries like "something--100" often expose "*-avCustom.xml".
         for content_id in re.findall(r"([a-z0-9][a-z0-9-]{5,}--\d+)", normalized_text, flags=re.IGNORECASE):
             lower_id = content_id.lower()
@@ -323,6 +401,8 @@ class NowPlayingDiscoveryService:
         lower_url = url.lower()
 
         if "${" in url or "%24%7b" in lower_url:
+            return False
+        if "form_action_url=" in lower_url:
             return False
 
         if "avcustom" in path:
@@ -369,7 +449,69 @@ class NowPlayingDiscoveryService:
             return True
         if "metadata/channel/" in path and (path.endswith(".json") or path.endswith("/")):
             return True
+        if self._looks_like_html_nowplaying_endpoint(url):
+            return True
         return False
+
+    def _looks_like_html_nowplaying_endpoint(self, url: str) -> bool:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        query = parsed.query.lower()
+        haystack = f"{path}?{query}"
+
+        has_html_hint = (
+            path.endswith(".html")
+            or path.endswith(".htm")
+            or path.endswith(".jsp")
+            or ".html/" in path
+            or ".htm/" in path
+        )
+        has_reload_hint = any(
+            token in haystack
+            for token in (
+                "ssi=true",
+                "module=",
+                "box=",
+                "middlecolumnlist",
+                "reloadcontent",
+                "jsb_reloadcontent",
+            )
+        )
+        has_nowplaying_hint = any(
+            token in haystack
+            for token in (
+                "now",
+                "onair",
+                "now_on_air",
+                "nowonair",
+                "playlist",
+                "track",
+                "song",
+                "titel",
+                "title",
+                "livestream",
+                "current",
+                "radiomodul",
+            )
+        )
+        has_direct_nowplaying_path = any(
+            token in path
+            for token in (
+                "now_on_air",
+                "nowonair",
+                "now-playing",
+                "nowplaying",
+                "currenttitle",
+                "currentsong",
+                "songs.html",
+                "songs.htm",
+                "playlist/index.jsp",
+                "radiomodul",
+            )
+        )
+        if has_html_hint and has_direct_nowplaying_path:
+            return True
+        return (has_html_hint or has_reload_hint) and has_reload_hint and has_nowplaying_hint
 
     def _looks_like_discovery_page(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -423,6 +565,18 @@ class NowPlayingDiscoveryService:
             score += 25
         if "currentsong" in path_query:
             score += 50
+        if "livestream" in path_query and "box=2" in path_query and "middlecolumnlist" in path_query:
+            score += 95
+        if "radiomodul-" in path_query:
+            score += 90
+        if "/musik/playlist/index.jsp" in path_query:
+            score += 45
+        if "now_on_air" in path_query:
+            score += 80
+        elif "nowonair" in path_query:
+            score += 35
+        if "songs.html" in path_query or "songs.htm" in path_query:
+            score -= 20
         if "ctrl-api" in path_query:
             score += 25
         if "metadata/channel/" in path_query:
@@ -433,6 +587,8 @@ class NowPlayingDiscoveryService:
             score += 25
         if any(param in query for param in ("k=", "skey=", "channelkey=", "streamkey=", "key=")):
             score += 30
+        if self._looks_like_html_nowplaying_endpoint(url):
+            score += 35
         if "${" in lower or "%24%7b" in lower:
             score -= 120
         return score
@@ -593,6 +749,284 @@ class NowPlayingDiscoveryService:
             source_kind="web_feed_json",
             source_url=source_url,
         )
+
+    def _parse_html_payload(self, payload: str, source_url: str) -> SongInfo | None:
+        if not payload:
+            return None
+
+        artist = ""
+        title = ""
+        current_show_artist, current_show_title = self._extract_current_show_song(payload)
+        if current_show_artist and current_show_title:
+            artist = current_show_artist
+            title = current_show_title
+
+        has_list_blocks = bool(re.search(r"<li\b", payload, flags=re.IGNORECASE))
+        if not (artist and title):
+            scored_candidates = self._extract_html_song_candidates(payload)
+            if scored_candidates:
+                scored_candidates.sort(reverse=True, key=lambda item: item[0])
+                best_score, artist, title = scored_candidates[0]
+                if best_score < 10:
+                    return None
+            elif has_list_blocks:
+                # A structured list was present, but no valid "current" item survived filtering.
+                return None
+            else:
+                artist = self._extract_html_class_value(payload, HTML_ARTIST_CLASS_KEYS)
+                title = self._extract_html_class_value(payload, HTML_TITLE_CLASS_KEYS)
+
+                if title and not artist:
+                    split_artist, split_title = self._split_compound_title(title)
+                    if split_artist and split_title:
+                        artist = split_artist
+                        title = split_title
+
+        title = title.strip()
+        artist = artist.strip()
+        if not title and not artist:
+            return None
+        if not artist or not title:
+            return None
+        if self._looks_like_placeholder_title(title, artist):
+            return None
+
+        stream_title = f"{artist} - {title}".strip(" -")
+        return SongInfo(
+            stream_title=stream_title,
+            raw_metadata=payload,
+            artist=artist,
+            title=title,
+            source_kind="web_feed_html",
+            source_url=source_url,
+        )
+
+    def _extract_current_show_song(self, payload: str) -> tuple[str, str]:
+        match = re.search(
+            r"<div[^>]*class=[\"'][^\"']*\bcurrentShow\b[^\"']*[\"'][^>]*>(?P<value>.*?)</div>",
+            payload,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return "", ""
+
+        text = self._clean_html_text(match.group("value"))
+        if not text:
+            return "", ""
+
+        text = re.sub(r"^(jetzt\s+l[aä]uft\s*:?)\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"^(gerade\s+l[aä]uft\s*:?)\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"^(now\s+playing\s*:?)\s*", "", text, flags=re.IGNORECASE).strip()
+        if not text:
+            return "", ""
+
+        for separator in (" von ", " by "):
+            lowered = text.lower()
+            idx = lowered.rfind(separator.lower())
+            if idx <= 0:
+                continue
+            title = text[:idx].strip(" -:|")
+            artist = text[idx + len(separator):].strip(" -:|")
+            if title and artist and len(title) >= 2 and len(artist) >= 2:
+                return artist, title
+
+        return "", ""
+
+    def _extract_html_song_candidates(self, payload: str) -> list[tuple[int, str, str]]:
+        blocks = re.findall(r"<li\b[^>]*>.*?</li>", payload, flags=re.IGNORECASE | re.DOTALL)
+        if not blocks:
+            return []
+
+        candidates: list[tuple[int, str, str]] = []
+        for block in blocks:
+            artist = self._extract_html_class_value(block, HTML_ARTIST_CLASS_KEYS).strip()
+            title = self._extract_html_class_value(block, HTML_TITLE_CLASS_KEYS).strip()
+            if title and not artist:
+                split_artist, split_title = self._split_compound_title(title)
+                if split_artist and split_title:
+                    artist = split_artist
+                    title = split_title
+            if not artist and not title:
+                continue
+            if self._looks_like_placeholder_title(title, artist):
+                continue
+
+            score = 0
+            if artist:
+                score += 8
+            if title:
+                score += 10
+
+            lower_block = block.lower()
+            if "comingup" in lower_block or "coming-up" in lower_block or "es folgt" in lower_block:
+                continue
+
+            time_text = self._extract_html_datetime(block)
+            age_minutes = self._age_minutes(time_text)
+            if age_minutes is not None:
+                if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
+                    continue
+                elif age_minutes >= 0:
+                    score += max(0, MAX_NOWPLAYING_AGE_MINUTES - age_minutes)
+                else:
+                    score += 5
+
+            candidates.append((score, artist, title))
+
+        return candidates
+
+    def _generate_html_nowplaying_variants(self, url: str) -> set[str]:
+        variants = set()
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return variants
+
+        path_lower = parsed.path.lower()
+        if "/nowonair/" in path_lower:
+            base_dir = parsed.path.rsplit("/", 1)[0]
+            for filename in ("now_on_air.html", "songs.html", "songs.htm"):
+                variants.add(urlunparse(parsed._replace(path=f"{base_dir}/{filename}", query="")))
+            variants.add(
+                urlunparse(
+                    parsed._replace(
+                        path="/livestream/index.htm/SSI=true/box=2/module=livestream%21middleColumnList.html",
+                        query="",
+                    )
+                )
+            )
+
+        if "/zeitstrahl/" in path_lower and "nowonair" in path_lower:
+            prefix = parsed.path.split("/zeitstrahl/", 1)[0]
+            for filename in ("now_on_air.html", "songs.html", "songs.htm"):
+                variants.add(urlunparse(parsed._replace(path=f"{prefix}/nowonair/{filename}", query="")))
+
+        variants.discard(url)
+        return variants
+
+    def _dedupe_url_variants(self, candidates: set[str]) -> set[str]:
+        grouped: dict[str, list[str]] = {}
+        for url in candidates:
+            key = self._url_variant_key(url)
+            grouped.setdefault(key, []).append(url)
+
+        deduped = set()
+        for variants in grouped.values():
+            best = max(variants, key=self._url_variant_priority)
+            deduped.add(best)
+        return deduped
+
+    def _url_variant_key(self, url: str) -> str:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        path = parsed.path.lower()
+        query = parsed.query.lower()
+        return f"{host}|{path}|{query}"
+
+    def _url_variant_priority(self, url: str) -> int:
+        parsed = urlparse(url)
+        score = 0
+        if parsed.scheme.lower() == "https":
+            score += 20
+        host = (parsed.hostname or "").lower()
+        if host.startswith("www."):
+            score += 10
+        return score
+
+    def _candidate_domain_preference(
+        self,
+        url: str,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> int:
+        score = 0
+        candidate_base = get_base_domain(url)
+        if not candidate_base:
+            return score
+
+        station_base = get_base_domain(station.homepage) if station and station.homepage else ""
+        if station_base and candidate_base == station_base:
+            score += 80
+
+        stream_base = get_base_domain(resolved.resolved_url)
+        if stream_base and candidate_base == stream_base:
+            score += 20
+
+        input_base = get_base_domain(resolved.input_url)
+        if input_base and candidate_base == input_base:
+            score += 15
+
+        return score
+
+    def _candidate_matches_input_context(
+        self,
+        url: str,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> bool:
+        lower_url = (url or "").lower()
+        if "radiomodul" not in lower_url:
+            return True
+
+        query_tokens = set()
+        if station and station.name:
+            query_tokens.update(self._tokenize_context_tokens(station.name))
+        if station and station.stream_url:
+            query_tokens.update(self._tokenize_context_tokens(station.stream_url))
+        if not query_tokens:
+            query_tokens = self._tokenize_context_tokens(resolved.input_url)
+        if len(query_tokens) < 2:
+            return True
+
+        candidate_tokens = self._tokenize_context_tokens(url)
+        common_tokens = query_tokens & candidate_tokens
+        min_overlap = 2 if len(query_tokens) < 3 else 3
+        return len(common_tokens) >= min_overlap
+
+    def _tokenize_context_tokens(self, value: str) -> set[str]:
+        raw_tokens = split_search_tokens(value)
+        if not raw_tokens:
+            return set()
+
+        tokens = set()
+        for token in raw_tokens:
+            if token in NOWPLAYING_QUERY_CONTEXT_IGNORE_TOKENS:
+                continue
+            if len(token) < 3 and not is_mixed_alnum_token(token):
+                continue
+            if token.isdigit():
+                continue
+            tokens.add(token)
+        return tokens
+
+    def _extract_html_datetime(self, payload: str) -> str:
+        match = re.search(r'datetime=["\']([^"\']+)["\']', payload, flags=re.IGNORECASE)
+        if not match:
+            return ""
+        return (match.group(1) or "").strip()
+
+    def _extract_html_class_value(self, payload: str, class_keys: tuple[str, ...]) -> str:
+        for class_key in class_keys:
+            pattern = (
+                r"<(?P<tag>[a-z0-9]+)[^>]*class=[\"'][^\"']*\b"
+                + re.escape(class_key)
+                + r"\b[^\"']*[\"'][^>]*>(?P<value>.*?)</(?P=tag)>"
+            )
+            match = re.search(pattern, payload, flags=re.IGNORECASE | re.DOTALL)
+            if not match:
+                continue
+
+            clean = self._clean_html_text(match.group("value"))
+            if clean:
+                return clean
+        return ""
+
+    def _clean_html_text(self, value: str) -> str:
+        text = html.unescape(value or "")
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
 
     def _walk_json_objects(self, value):
         if isinstance(value, dict):
@@ -1049,11 +1483,11 @@ class NowPlayingDiscoveryService:
             }
         else:
             stopwords = {"radio", "fm", "deutschland"}
-        cleaned = re.sub(r"[^a-z0-9]+", " ", (value or "").lower())
+        tokens = split_search_tokens(value)
         return {
             token
-            for token in cleaned.split()
-            if len(token) >= 3 and token not in stopwords and not token.isdigit()
+            for token in tokens
+            if (len(token) >= 3 or is_mixed_alnum_token(token)) and token not in stopwords and not token.isdigit()
         }
 
     def _duration_seconds(self, value: str) -> int | None:

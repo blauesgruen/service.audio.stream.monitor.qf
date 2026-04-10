@@ -45,6 +45,85 @@ PLAYLIST_READ_BYTES = 524288
 MAX_REDIRECTS = 8
 USER_AGENT = f"{APP_NAME}/{APP_VERSION}"
 RADIO_BROWSER_LOOKUP_LIMIT = 25
+RADIO_BROWSER_SEARCH_LOOKUP_LIMIT = 50
+STATION_LOOKUP_MIN_QUERY_LENGTH = 5
+STATION_LOOKUP_MIN_TOKENS_PER_VARIANT = 2
+STATION_LOOKUP_MAX_QUERY_VARIANTS = 12
+STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS = 8
+STATION_LOOKUP_SEARCH_MIN_TOKEN_LENGTH = 4
+STATION_LOOKUP_CHANNEL_FALLBACK_MAX_CHANNELS = 40
+STATION_LOOKUP_CHANNEL_FALLBACK_MAX_PAGES = 6
+STATION_LOOKUP_CHANNEL_FALLBACK_MIN_SCORE = 900
+STATION_LOOKUP_STRICT_MIN_QUERY_TOKENS = 2
+STATION_LOOKUP_OPTIONAL_PREFIX_TOKENS = {
+    "ard",
+    "bbc",
+    "br",
+    "hr",
+    "mdr",
+    "ndr",
+    "orf",
+    "rbb",
+    "sr",
+    "swr",
+    "wdr",
+}
+STATION_LOOKUP_SIGNIFICANT_SHORT_TOKENS = {
+    "dj",
+}
+STATION_LOOKUP_IGNORED_TOKENS = {
+    "radio",
+}
+STATION_LOOKUP_SKIP_PREFIX_TOKENS = {
+    "vom",
+    "von",
+    "der",
+    "die",
+    "das",
+    "dem",
+    "den",
+    "des",
+    "am",
+    "im",
+    "mit",
+    "und",
+    "the",
+    "of",
+}
+STATION_LOOKUP_NUMBER_TOKEN_MAP = {
+    "zero": "0",
+    "null": "0",
+    "one": "1",
+    "eins": "1",
+    "ein": "1",
+    "eine": "1",
+    "two": "2",
+    "zwei": "2",
+    "three": "3",
+    "drei": "3",
+    "four": "4",
+    "vier": "4",
+    "five": "5",
+    "fuenf": "5",
+    "fünf": "5",
+    "six": "6",
+    "sechs": "6",
+    "seven": "7",
+    "sieben": "7",
+    "eight": "8",
+    "acht": "8",
+    "nine": "9",
+    "neun": "9",
+    "ten": "10",
+    "zehn": "10",
+    "eleven": "11",
+    "elf": "11",
+    "twelve": "12",
+    "zwoelf": "12",
+    "zwölf": "12",
+}
+STATION_LOOKUP_SLUG_MIN_LENGTH = 3
+STATION_LOOKUP_MAX_SLUG_VARIANTS = 20
 
 RADIO_BROWSER_BASE_URLS = [
     "http://de1.api.radio-browser.info",
@@ -66,8 +145,49 @@ DISCOVERY_MAX_CANDIDATES = 15
 DISCOVERY_REQUEST_TIMEOUT_SECONDS = 2
 MAX_NOWPLAYING_AGE_MINUTES = 45
 NOWPLAYING_DURATION_GRACE_SECONDS = 45
+NOWPLAYING_STRICT_WEBPLAYER_SOURCE = True
+NOWPLAYING_QUERY_CONTEXT_IGNORE_TOKENS = {
+    "http",
+    "https",
+    "www",
+    "www1",
+    "www2",
+    "de",
+    "com",
+    "net",
+    "org",
+    "radio",
+    "stream",
+    "live",
+    "mp3",
+    "aac",
+    "ogg",
+    "m3u",
+    "m3u8",
+    "hls",
+    "icecast",
+    "icecastssl",
+    "dispatcher",
+    "rndfnk",
+    "ard",
+    "vom",
+    "von",
+    "der",
+    "die",
+    "das",
+    "dem",
+    "den",
+    "des",
+    "im",
+    "am",
+    "und",
+    "the",
+    "of",
+    "in",
+}
 NOWPLAYING_CANDIDATE_KEYWORDS = (
     "playlist",
+    "radiomodul",
     "titelliste",
     "playout",
     "onair",
