@@ -106,6 +106,7 @@ class StationLookupService:
         if not collected:
             fallback_station = self._fallback_web_directory_station(query_clean)
             if fallback_station:
+                self._apply_query_alias_name(fallback_station, query_clean)
                 self._log(
                     "Sender-Match (Web-Fallback): "
                     f"{fallback_station.name} | {fallback_station.country or '-'} | "
@@ -145,17 +146,30 @@ class StationLookupService:
                         return best
 
             if used_search_fallback:
-                self._log(
-                    "Search-Fallback Treffer verworfen (zu geringe Token-Deckung): "
-                    f"{best.name}"
-                )
+                if self._has_stream_channel_conflict(best, query_clean):
+                    self._log(
+                        "Search-Fallback Treffer verworfen (Kanal-Konflikt zwischen Name und Stream): "
+                        f"{best.name}"
+                    )
+                else:
+                    self._log(
+                        "Search-Fallback Treffer verworfen (zu geringe Token-Deckung): "
+                        f"{best.name}"
+                    )
             else:
-                self._log(
-                    "Sender-Match verworfen (zu geringe Token-Deckung): "
-                    f"{best.name}"
-                )
+                if self._has_stream_channel_conflict(best, query_clean):
+                    self._log(
+                        "Sender-Match verworfen (Kanal-Konflikt zwischen Name und Stream): "
+                        f"{best.name}"
+                    )
+                else:
+                    self._log(
+                        "Sender-Match verworfen (zu geringe Token-Deckung): "
+                        f"{best.name}"
+                    )
             channel_fallback_station = self._fallback_channel_station_from_anchor(query_clean, best)
             if channel_fallback_station:
+                self._apply_query_alias_name(channel_fallback_station, query_clean)
                 self._log(
                     "Sender-Match (Channel-Fallback): "
                     f"{channel_fallback_station.name} | {channel_fallback_station.country or '-'} | "
@@ -163,8 +177,19 @@ class StationLookupService:
                     f"votes={channel_fallback_station.votes}"
                 )
                 return channel_fallback_station
+            homepage_stream_fallback = self._fallback_stream_from_homepage(query_clean, best)
+            if homepage_stream_fallback and self._is_confident_station_match(homepage_stream_fallback, query_clean):
+                self._apply_query_alias_name(homepage_stream_fallback, query_clean)
+                self._log(
+                    "Sender-Match (Homepage-Stream-Fallback): "
+                    f"{homepage_stream_fallback.name} | {homepage_stream_fallback.country or '-'} | "
+                    f"{homepage_stream_fallback.codec or '-'} {homepage_stream_fallback.bitrate}kbps | "
+                    f"votes={homepage_stream_fallback.votes}"
+                )
+                return homepage_stream_fallback
             fallback_station = self._fallback_web_directory_station(query_clean)
             if fallback_station and self._is_confident_station_match(fallback_station, query_clean):
+                self._apply_query_alias_name(fallback_station, query_clean)
                 self._log(
                     "Sender-Match (Web-Fallback): "
                     f"{fallback_station.name} | {fallback_station.country or '-'} | "
@@ -174,10 +199,39 @@ class StationLookupService:
                 return fallback_station
             raise StationLookupError(f"Keinen passenden Sender gefunden für '{query_clean}'.")
 
+        self._apply_query_alias_name(best, query_clean)
         self._log(
             f"Sender-Match: {best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
         )
         return best
+
+    def _apply_query_alias_name(self, station: StationMatch, query: str) -> None:
+        query_tokens = self._build_signature_tokens(query)
+        query_alpha_tokens = {token for token in query_tokens if not token.isdigit()}
+        if len(query_alpha_tokens) < 2:
+            return
+
+        station_name_tokens = self._build_signature_tokens(station.name or "")
+        missing_alpha = {token for token in query_alpha_tokens if token not in station_name_tokens}
+        if not missing_alpha:
+            return
+
+        stream_tokens = self._build_signature_tokens(
+            " ".join(
+                (
+                    station.stream_url or "",
+                    station.homepage or "",
+                )
+            )
+        )
+        if not all(token in stream_tokens for token in missing_alpha):
+            return
+
+        overlap_alpha = {token for token in query_alpha_tokens if token in station_name_tokens}
+        if len(overlap_alpha) < 2:
+            return
+
+        station.name = re.sub(r"\s+", " ", (query or "").strip())
 
     def _collect_search_candidates(
         self,
@@ -284,7 +338,21 @@ class StationLookupService:
         if query_signature and not common_tokens:
             signature_score -= 250
 
-        return (similarity * 500) + exact_bonus + health_score + vote_score + bitrate_score + signature_score
+        station_name_signature = self._build_signature_tokens(station.name or "")
+        common_name_tokens = query_signature & station_name_signature
+        name_token_score = 0.0
+        for token in common_name_tokens:
+            name_token_score += 120 if token.isdigit() else 450
+
+        return (
+            (similarity * 500)
+            + exact_bonus
+            + health_score
+            + vote_score
+            + bitrate_score
+            + signature_score
+            + name_token_score
+        )
 
     def _fallback_channel_station_from_anchor(self, query: str, anchor_station: StationMatch) -> StationMatch | None:
         homepage = (anchor_station.homepage or "").strip()
@@ -320,6 +388,116 @@ class StationLookupService:
         if not self._is_confident_station_match(best, query):
             return None
         return best
+
+    def _fallback_stream_from_homepage(self, query: str, anchor_station: StationMatch) -> StationMatch | None:
+        homepage = (anchor_station.homepage or "").strip()
+        if not is_probable_url(homepage):
+            return None
+
+        page_html = self._fetch_text(homepage)
+        if not page_html:
+            return None
+
+        normalized = (
+            html.unescape(page_html)
+            .replace("\\/", "/")
+            .replace("\\u002f", "/")
+            .replace("\\u002F", "/")
+            .replace("\\u003a", ":")
+            .replace("\\u003A", ":")
+        )
+        urls = set(re.findall(r"https?://[^\"'\s<>()]+", normalized, flags=re.IGNORECASE))
+        if not urls:
+            return None
+
+        query_tokens = self._build_signature_tokens(query)
+        if not query_tokens:
+            return None
+
+        homepage_tokens = self._build_signature_tokens(homepage)
+        generic_channel_tokens = {
+            "berliner",
+            "rundfunk",
+            "radio",
+            "stream",
+            "live",
+            "musik",
+            "hits",
+            "pop",
+        }
+        channel_tokens = {
+            token
+            for token in query_tokens
+            if not token.isdigit() and len(token) >= 5 and token not in homepage_tokens and token not in generic_channel_tokens
+        }
+
+        best_candidate_url = ""
+        best_score = float("-inf")
+        homepage_base = get_base_domain(homepage)
+        for raw_url in urls:
+            candidate_url = html.unescape(self._sanitize_candidate_url(raw_url))
+            if not candidate_url:
+                continue
+            if not self._looks_like_stream_pattern(candidate_url):
+                continue
+
+            candidate_tokens = self._build_signature_tokens(candidate_url)
+            if not candidate_tokens:
+                continue
+            if channel_tokens and not (channel_tokens & candidate_tokens):
+                continue
+
+            common_tokens = query_tokens & candidate_tokens
+            if not common_tokens:
+                continue
+
+            score = 0.0
+            for token in common_tokens:
+                score += 60 if token.isdigit() else 220
+            for token in (channel_tokens & candidate_tokens):
+                score += 450
+            if homepage_base and get_base_domain(candidate_url) == homepage_base:
+                score += 60
+
+            lower_candidate_url = candidate_url.lower()
+            if "mp3-128" in lower_candidate_url:
+                score += 20
+            elif "mp3-192" in lower_candidate_url or "aac-64" in lower_candidate_url:
+                score += 10
+
+            if score > best_score:
+                best_score = score
+                best_candidate_url = candidate_url
+
+        if not best_candidate_url:
+            return None
+        if not self._looks_like_stream_endpoint(best_candidate_url):
+            return None
+
+        raw_record = dict(anchor_station.raw_record or {})
+        raw_record.update(
+            {
+                "source": "homepage_stream_fallback",
+                "anchor_stationuuid": anchor_station.stationuuid,
+                "anchor_stream_url": anchor_station.stream_url,
+                "stream_url": best_candidate_url,
+                "homepage": homepage,
+            }
+        )
+
+        return StationMatch(
+            stationuuid=f"homepage-stream-fallback:{anchor_station.stationuuid or 'unknown'}",
+            name=anchor_station.name or query,
+            stream_url=best_candidate_url,
+            homepage=homepage,
+            country=anchor_station.country,
+            language=anchor_station.language,
+            codec=anchor_station.codec,
+            bitrate=anchor_station.bitrate,
+            votes=anchor_station.votes,
+            lastcheckok=anchor_station.lastcheckok,
+            raw_record=raw_record,
+        )
 
     def _extract_channel_page_urls(self, page_html: str, base_url: str) -> list[str]:
         normalized = html.unescape(page_html or "").replace("\\/", "/")
@@ -673,6 +851,8 @@ class StationLookupService:
     def _is_confident_station_match(self, station: StationMatch, query: str) -> bool:
         if not self._is_confident_search_match(station, query):
             return False
+        if self._has_stream_channel_conflict(station, query):
+            return False
 
         query_tokens_with_pos = self._build_query_tokens_for_strict_match(query)
         if len(query_tokens_with_pos) < STATION_LOOKUP_STRICT_MIN_QUERY_TOKENS:
@@ -701,6 +881,68 @@ class StationLookupService:
             ):
                 return True
         return False
+
+    def _has_stream_channel_conflict(self, station: StationMatch, query: str) -> bool:
+        query_tokens = self._build_signature_tokens(query)
+        if not query_tokens:
+            return False
+
+        name_tokens = self._build_signature_tokens(station.name or "")
+        stream_tokens = self._build_signature_tokens(
+            " ".join(
+                (
+                    station.stream_url or "",
+                    station.homepage or "",
+                )
+            )
+        )
+        homepage_tokens = self._build_signature_tokens(station.homepage or "")
+
+        # Focus only on channel-descriptor-like tokens from the query that the station name claims,
+        # excluding generic homepage brand tokens.
+        focus_tokens = {
+            token
+            for token in (query_tokens & name_tokens)
+            if not token.isdigit() and len(token) >= 5 and token not in homepage_tokens
+        }
+        if not focus_tokens:
+            return False
+
+        missing_focus_tokens = {token for token in focus_tokens if token not in stream_tokens}
+        if not missing_focus_tokens:
+            return False
+
+        generic_stream_tokens = {
+            "http",
+            "https",
+            "www",
+            "stream",
+            "live",
+            "audio",
+            "radio",
+            "mp3",
+            "aac",
+            "m3u",
+            "m3u8",
+            "edge",
+            "frontend",
+            "dispatcher",
+            "rndfnk",
+            "icecast",
+            "icecastssl",
+        }
+        conflicting_stream_tokens = {
+            token
+            for token in stream_tokens
+            if (
+                token not in query_tokens
+                and token not in homepage_tokens
+                and token not in generic_stream_tokens
+                and not token.isdigit()
+                and len(token) >= 5
+            )
+        }
+        return bool(conflicting_stream_tokens)
 
     def _build_query_tokens_for_strict_match(self, value: str) -> list[tuple[str, int]]:
         raw_tokens = split_search_tokens(value)

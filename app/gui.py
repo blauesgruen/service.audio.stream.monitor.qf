@@ -22,6 +22,7 @@ if __package__:
         ORIGIN_ONLY_MODE,
         SONG_CLEAR_EMPTY_CYCLES,
         SONG_END_EMPTY_METADATA_CYCLES,
+        SONG_END_ICY_MISSING_TITLE_GRACE_CYCLES,
         NOWPLAYING_STALE_WITHOUT_STREAM_TRACK_MAX_AGE_MINUTES,
         SONG_REFRESH_INTERVAL_SECONDS,
         UI_POLL_INTERVAL_MS,
@@ -50,6 +51,7 @@ else:
         ORIGIN_ONLY_MODE,
         SONG_CLEAR_EMPTY_CYCLES,
         SONG_END_EMPTY_METADATA_CYCLES,
+        SONG_END_ICY_MISSING_TITLE_GRACE_CYCLES,
         NOWPLAYING_STALE_WITHOUT_STREAM_TRACK_MAX_AGE_MINUTES,
         SONG_REFRESH_INTERVAL_SECONDS,
         UI_POLL_INTERVAL_MS,
@@ -417,6 +419,8 @@ class RadioToolApp:
             last_stream_error = ""
             reported_stream_deferred = False
             last_song_state = "IDLE"
+            consecutive_missing_streamtitle_cycles = 0
+            reported_streamtitle_grace = False
 
             def classify_song_source(url: str) -> tuple[bool, str]:
                 if not url:
@@ -462,6 +466,7 @@ class RadioToolApp:
                 stream_song_is_track = False
                 stream_song_is_origin = False
                 stream_song_approval = ""
+                stream_title_missing_in_cycle = False
                 strict_webplayer_mode = (
                     NOWPLAYING_STRICT_WEBPLAYER_SOURCE
                     and bool(official_html_feed_candidates)
@@ -471,8 +476,14 @@ class RadioToolApp:
                     stream_song = fetcher.fetch(resolved.resolved_url)
                     self.logger.log(f"ICY-Slot: {stream_song.stream_title}")
                     last_stream_error = ""
+                    consecutive_missing_streamtitle_cycles = 0
                 except (MetadataError, URLError, TimeoutError, OSError) as meta_err:
                     current_error = str(meta_err)
+                    if "kein StreamTitle gefunden" in current_error:
+                        stream_title_missing_in_cycle = True
+                        consecutive_missing_streamtitle_cycles += 1
+                    else:
+                        consecutive_missing_streamtitle_cycles = 0
                     if current_error != last_stream_error:
                         self.logger.log(f"Songabfrage fehlgeschlagen: {meta_err}")
                         self._results.put(("error", f"Songabfrage fehlgeschlagen: {meta_err}"))
@@ -584,15 +595,30 @@ class RadioToolApp:
                     consecutive_no_song_cycles = 0
                     consecutive_empty_metadata_cycles = 0
                     reported_no_origin_song = False
+                    reported_streamtitle_grace = False
                     publish_song_state("PLAYING")
                 else:
-                    consecutive_no_song_cycles += 1
+                    in_streamtitle_grace = (
+                        stream_title_missing_in_cycle
+                        and consecutive_missing_streamtitle_cycles <= SONG_END_ICY_MISSING_TITLE_GRACE_CYCLES
+                    )
+                    if in_streamtitle_grace:
+                        if not reported_streamtitle_grace:
+                            self.logger.log(
+                                "ICY-Titel fehlt temporaer; warte auf stabilen Leerzustand."
+                            )
+                            reported_streamtitle_grace = True
+                        consecutive_no_song_cycles = 0
+                    else:
+                        reported_streamtitle_grace = False
+                        consecutive_no_song_cycles += 1
+
                     poll_has_metadata = has_metadata_signal(stream_song) or has_metadata_signal(feed_song)
-                    if poll_has_metadata:
+                    if poll_has_metadata or in_streamtitle_grace:
                         publish_song_state("MAYBE_ENDED")
                     else:
                         publish_song_state("NO_METADATA")
-                    if poll_has_metadata:
+                    if poll_has_metadata or in_streamtitle_grace:
                         consecutive_empty_metadata_cycles = 0
                     else:
                         consecutive_empty_metadata_cycles += 1
@@ -615,18 +641,20 @@ class RadioToolApp:
                             consecutive_empty_metadata_cycles = 0
 
                     if restricted_source_mode:
-                        self.logger.log("Keine Quelle mit eindeutigem Artist in diesem Poll-Zyklus")
-                        if not reported_no_origin_song:
-                            if ORIGIN_ONLY_MODE and ALLOW_OFFICIAL_CHAIN_SOURCES:
-                                message = "Keine aktuelle Origin-/Player-Ketten-Quelle mit eindeutigem Artist gefunden"
-                            elif ORIGIN_ONLY_MODE:
-                                message = "Keine aktuelle Origin-Quelle mit eindeutigem Artist gefunden"
-                            else:
-                                message = "Keine aktuelle Quelle mit eindeutigem Artist gefunden"
-                            if rejected_non_origin_source:
-                                message += " (nicht erlaubte Quelle verworfen)"
-                            self._results.put(("error", message))
-                            reported_no_origin_song = True
+                        suppress_no_artist_warning = in_streamtitle_grace and bool(last_song_key)
+                        if not suppress_no_artist_warning:
+                            self.logger.log("Keine Quelle mit eindeutigem Artist in diesem Poll-Zyklus")
+                            if not reported_no_origin_song:
+                                if ORIGIN_ONLY_MODE and ALLOW_OFFICIAL_CHAIN_SOURCES:
+                                    message = "Keine aktuelle Origin-/Player-Ketten-Quelle mit eindeutigem Artist gefunden"
+                                elif ORIGIN_ONLY_MODE:
+                                    message = "Keine aktuelle Origin-Quelle mit eindeutigem Artist gefunden"
+                                else:
+                                    message = "Keine aktuelle Quelle mit eindeutigem Artist gefunden"
+                                if rejected_non_origin_source:
+                                    message += " (nicht erlaubte Quelle verworfen)"
+                                self._results.put(("error", message))
+                                reported_no_origin_song = True
 
                 for _ in range(SONG_REFRESH_INTERVAL_SECONDS):
                     if self._stop_event.is_set():
