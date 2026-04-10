@@ -15,6 +15,7 @@ from .config import (
     APP_NAME,
     DB_PATH,
     EPG_SEARCH_DEFAULT_ENABLED,
+    NOWPLAYING_STRICT_WEBPLAYER_SOURCE,
     ORIGIN_ONLY_MODE,
     SONG_CLEAR_EMPTY_CYCLES,
     SONG_REFRESH_INTERVAL_SECONDS,
@@ -35,7 +36,7 @@ class RadioToolApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("940x520")
+        self.root.geometry("940x560")
 
         self.logger = LiveLogger()
         self.db = SourceDatabase(DB_PATH)
@@ -57,6 +58,7 @@ class RadioToolApp:
         self.delivery_var = tk.StringVar(value="-")
         self.content_type_var = tk.StringVar(value="-")
         self.song_var = tk.StringVar(value="-")
+        self.song_source_var = tk.StringVar(value="-")
         self.epg_var = tk.StringVar(value="-")
         self.epg_enabled_var = tk.BooleanVar(value=EPG_SEARCH_DEFAULT_ENABLED)
         self.origin_mode_var = tk.StringVar(
@@ -121,13 +123,16 @@ class RadioToolApp:
             row=13, column=0, columnspan=5, sticky="w"
         )
 
-        ttk.Label(frame, text="EPG-Status:").grid(row=14, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.epg_var).grid(row=15, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, text="Song-Quelle URL:").grid(row=14, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.song_source_var).grid(row=15, column=0, columnspan=5, sticky="w")
 
-        ttk.Label(frame, textvariable=self.origin_mode_var).grid(row=16, column=0, columnspan=5, sticky="w", pady=(10, 0))
+        ttk.Label(frame, text="EPG-Status:").grid(row=16, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.epg_var).grid(row=17, column=0, columnspan=5, sticky="w")
 
-        ttk.Separator(frame, orient="horizontal").grid(row=17, column=0, columnspan=5, sticky="ew", pady=10)
-        ttk.Label(frame, textvariable=self.status_var).grid(row=18, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, textvariable=self.origin_mode_var).grid(row=18, column=0, columnspan=5, sticky="w", pady=(10, 0))
+
+        ttk.Separator(frame, orient="horizontal").grid(row=19, column=0, columnspan=5, sticky="ew", pady=10)
+        ttk.Label(frame, textvariable=self.status_var).grid(row=20, column=0, columnspan=5, sticky="w")
 
         frame.columnconfigure(0, weight=1)
 
@@ -203,12 +208,14 @@ class RadioToolApp:
                 if song.source_kind.startswith("web_feed"):
                     display_song = f"{display_song} [Feed]"
                 self.song_var.set(display_song)
+                self.song_source_var.set(song.source_url or "-")
                 self.status_var.set("Songinfo aktualisiert")
                 self.save_button.configure(state="normal")
                 self._render_source_details()
             elif event == "song_cleared":
                 self._current_song = None
                 self.song_var.set("-")
+                self.song_source_var.set("-")
                 self.status_var.set("Aktuell kein Song verfÃ¼gbar")
                 self._render_source_details()
             elif event == "epg":
@@ -272,6 +279,7 @@ class RadioToolApp:
         self.resolved_var.set("-")
         self.delivery_var.set("-")
         self.song_var.set("-")
+        self.song_source_var.set("-")
         self.content_type_var.set("-")
         self.epg_var.set("-")
         self._render_source_details()
@@ -358,6 +366,7 @@ class RadioToolApp:
                 self._results.put(("epg_disabled", None))
 
             feed_candidates: list[str] = []
+            official_html_feed_candidates: list[str] = []
             preferred_feed_url = ""
             reported_no_origin_song = False
             last_song_key = ""
@@ -365,6 +374,7 @@ class RadioToolApp:
             rejected_non_origin_source = False
             restricted_source_mode = ORIGIN_ONLY_MODE or ALLOW_OFFICIAL_CHAIN_SOURCES
             last_stream_error = ""
+            reported_stream_deferred = False
 
             def classify_song_source(url: str) -> tuple[bool, str]:
                 if not url:
@@ -388,6 +398,13 @@ class RadioToolApp:
             while not self._stop_event.is_set():
                 stream_song: SongInfo | None = None
                 chosen_song: SongInfo | None = None
+                stream_song_is_track = False
+                stream_song_is_origin = False
+                stream_song_approval = ""
+                strict_webplayer_mode = (
+                    NOWPLAYING_STRICT_WEBPLAYER_SOURCE
+                    and bool(official_html_feed_candidates)
+                )
 
                 try:
                     stream_song = fetcher.fetch(resolved.resolved_url)
@@ -403,12 +420,6 @@ class RadioToolApp:
                 if stream_song:
                     stream_song_is_track = bool(stream_song.artist and stream_song.title)
                     stream_song_is_origin, stream_song_approval = classify_song_source(stream_song.source_url)
-                    chosen_song = stream_song if (
-                        stream_song_is_track
-                        and stream_song_is_origin
-                    ) else None
-                    if chosen_song:
-                        chosen_song.source_approval = stream_song_approval
                     if stream_song_is_track and not stream_song_is_origin:
                         rejected_non_origin_source = True
                         self.logger.log(f"Stream-Metadaten verworfen (nicht erlaubt): {stream_song.source_url}")
@@ -426,6 +437,15 @@ class RadioToolApp:
                         else:
                             rejected_non_origin_source = True
                             self.logger.log(f"Feed-Kandidat verworfen (nicht erlaubt): {url}")
+                    official_html_feed_candidates = now_playing_discovery.filter_official_html_candidates(
+                        feed_candidates,
+                        station,
+                    )
+                    if official_html_feed_candidates:
+                        self.logger.log(
+                            "Offizielle HTML-Now-Playing-Feeds priorisiert: "
+                            + ", ".join(official_html_feed_candidates)
+                        )
                     linked_domains = sorted(now_playing_discovery.get_linked_domains() - origin_domains)
                     if linked_domains:
                         self.logger.log(
@@ -433,8 +453,31 @@ class RadioToolApp:
                         )
                     self._results.put(("feed_candidates", feed_candidates))
 
+                strict_webplayer_mode = (
+                    NOWPLAYING_STRICT_WEBPLAYER_SOURCE
+                    and bool(official_html_feed_candidates)
+                )
+                if stream_song_is_track and stream_song_is_origin:
+                    if strict_webplayer_mode:
+                        if not reported_stream_deferred:
+                            self.logger.log(
+                                "ICY-Treffer zurückgestellt: offizieller HTML-Webplayer-Feed verfügbar."
+                            )
+                            reported_stream_deferred = True
+                    else:
+                        chosen_song = stream_song
+                        chosen_song.source_approval = stream_song_approval
+                        reported_stream_deferred = False
+                elif not strict_webplayer_mode:
+                    reported_stream_deferred = False
+
                 if feed_candidates:
-                    probe_list = [preferred_feed_url] if preferred_feed_url else feed_candidates
+                    probe_candidates = (
+                        official_html_feed_candidates if strict_webplayer_mode else feed_candidates
+                    )
+                    if preferred_feed_url and preferred_feed_url not in probe_candidates:
+                        preferred_feed_url = ""
+                    probe_list = [preferred_feed_url] if preferred_feed_url else probe_candidates
                     feed_song = now_playing_discovery.fetch_now_playing(probe_list)
                     if feed_song and feed_song.artist and feed_song.title:
                         # Keep stream headers available in detail view where possible.
