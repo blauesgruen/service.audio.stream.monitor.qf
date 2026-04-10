@@ -3,40 +3,73 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from queue import Empty, Queue
 from tkinter import messagebox, ttk
 from urllib.error import HTTPError, URLError
 
-from .config import (
-    ALLOW_OFFICIAL_CHAIN_SOURCES,
-    APP_NAME,
-    DB_PATH,
-    EPG_SEARCH_DEFAULT_ENABLED,
-    NOWPLAYING_STRICT_WEBPLAYER_SOURCE,
-    ORIGIN_ONLY_MODE,
-    SONG_CLEAR_EMPTY_CYCLES,
-    SONG_REFRESH_INTERVAL_SECONDS,
-    UI_POLL_INTERVAL_MS,
-)
-from .database import SourceDatabase
-from .epg_service import EpgService
-from .live_logger import LiveLogger
-from .metadata import MetadataError, SongMetadataFetcher
-from .models import EpgInfo, ResolvedStream, SongInfo, StationMatch
-from .now_playing_discovery import NowPlayingDiscoveryService
-from .station_lookup import StationLookupError, StationLookupService
-from .stream_resolver import StreamResolveError, StreamResolver
-from .utils import get_base_domain, is_non_origin_directory_url, is_origin_url, is_probable_url
+if __package__:
+    from .config import (
+        ALLOW_OFFICIAL_CHAIN_SOURCES,
+        APP_NAME,
+        DB_PATH,
+        EPG_SEARCH_DEFAULT_ENABLED,
+        NOWPLAYING_STRICT_WEBPLAYER_SOURCE,
+        ORIGIN_ONLY_MODE,
+        SONG_CLEAR_EMPTY_CYCLES,
+        SONG_END_EMPTY_METADATA_CYCLES,
+        NOWPLAYING_STALE_WITHOUT_STREAM_TRACK_MAX_AGE_MINUTES,
+        SONG_REFRESH_INTERVAL_SECONDS,
+        UI_POLL_INTERVAL_MS,
+    )
+    from .database import SourceDatabase
+    from .epg_service import EpgService
+    from .live_logger import LiveLogger
+    from .metadata import MetadataError, SongMetadataFetcher
+    from .models import EpgInfo, ResolvedStream, SongInfo, StationMatch
+    from .now_playing_discovery import NowPlayingDiscoveryService
+    from .station_lookup import StationLookupError, StationLookupService
+    from .stream_resolver import StreamResolveError, StreamResolver
+    from .utils import get_base_domain, is_non_origin_directory_url, is_origin_url, is_probable_url
+else:
+    # Allow direct execution via `python app/gui.py`.
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    from app.config import (
+        ALLOW_OFFICIAL_CHAIN_SOURCES,
+        APP_NAME,
+        DB_PATH,
+        EPG_SEARCH_DEFAULT_ENABLED,
+        NOWPLAYING_STRICT_WEBPLAYER_SOURCE,
+        ORIGIN_ONLY_MODE,
+        SONG_CLEAR_EMPTY_CYCLES,
+        SONG_END_EMPTY_METADATA_CYCLES,
+        NOWPLAYING_STALE_WITHOUT_STREAM_TRACK_MAX_AGE_MINUTES,
+        SONG_REFRESH_INTERVAL_SECONDS,
+        UI_POLL_INTERVAL_MS,
+    )
+    from app.database import SourceDatabase
+    from app.epg_service import EpgService
+    from app.live_logger import LiveLogger
+    from app.metadata import MetadataError, SongMetadataFetcher
+    from app.models import EpgInfo, ResolvedStream, SongInfo, StationMatch
+    from app.now_playing_discovery import NowPlayingDiscoveryService
+    from app.station_lookup import StationLookupError, StationLookupService
+    from app.stream_resolver import StreamResolveError, StreamResolver
+    from app.utils import get_base_domain, is_non_origin_directory_url, is_origin_url, is_probable_url
 
 
 class RadioToolApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("940x560")
+        self.root.geometry("940x600")
 
         self.logger = LiveLogger()
         self.db = SourceDatabase(DB_PATH)
@@ -59,6 +92,7 @@ class RadioToolApp:
         self.content_type_var = tk.StringVar(value="-")
         self.song_var = tk.StringVar(value="-")
         self.song_source_var = tk.StringVar(value="-")
+        self.song_state_var = tk.StringVar(value="IDLE")
         self.epg_var = tk.StringVar(value="-")
         self.epg_enabled_var = tk.BooleanVar(value=EPG_SEARCH_DEFAULT_ENABLED)
         self.origin_mode_var = tk.StringVar(
@@ -126,13 +160,16 @@ class RadioToolApp:
         ttk.Label(frame, text="Song-Quelle URL:").grid(row=14, column=0, sticky="w", pady=(10, 0))
         ttk.Label(frame, textvariable=self.song_source_var).grid(row=15, column=0, columnspan=5, sticky="w")
 
-        ttk.Label(frame, text="EPG-Status:").grid(row=16, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.epg_var).grid(row=17, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, text="Song-Status:").grid(row=16, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.song_state_var).grid(row=17, column=0, columnspan=5, sticky="w")
 
-        ttk.Label(frame, textvariable=self.origin_mode_var).grid(row=18, column=0, columnspan=5, sticky="w", pady=(10, 0))
+        ttk.Label(frame, text="EPG-Status:").grid(row=18, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.epg_var).grid(row=19, column=0, columnspan=5, sticky="w")
 
-        ttk.Separator(frame, orient="horizontal").grid(row=19, column=0, columnspan=5, sticky="ew", pady=10)
-        ttk.Label(frame, textvariable=self.status_var).grid(row=20, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, textvariable=self.origin_mode_var).grid(row=20, column=0, columnspan=5, sticky="w", pady=(10, 0))
+
+        ttk.Separator(frame, orient="horizontal").grid(row=21, column=0, columnspan=5, sticky="ew", pady=10)
+        ttk.Label(frame, textvariable=self.status_var).grid(row=22, column=0, columnspan=5, sticky="w")
 
         frame.columnconfigure(0, weight=1)
 
@@ -216,8 +253,10 @@ class RadioToolApp:
                 self._current_song = None
                 self.song_var.set("-")
                 self.song_source_var.set("-")
-                self.status_var.set("Aktuell kein Song verfÃ¼gbar")
+                self.status_var.set("Aktuell kein Song verfuegbar")
                 self._render_source_details()
+            elif event == "song_state":
+                self.song_state_var.set(str(payload))
             elif event == "epg":
                 self._current_epg = payload
                 self.epg_var.set(payload.summary)
@@ -280,6 +319,7 @@ class RadioToolApp:
         self.delivery_var.set("-")
         self.song_var.set("-")
         self.song_source_var.set("-")
+        self.song_state_var.set("IDLE")
         self.content_type_var.set("-")
         self.epg_var.set("-")
         self._render_source_details()
@@ -371,10 +411,12 @@ class RadioToolApp:
             reported_no_origin_song = False
             last_song_key = ""
             consecutive_no_song_cycles = 0
+            consecutive_empty_metadata_cycles = 0
             rejected_non_origin_source = False
             restricted_source_mode = ORIGIN_ONLY_MODE or ALLOW_OFFICIAL_CHAIN_SOURCES
             last_stream_error = ""
             reported_stream_deferred = False
+            last_song_state = "IDLE"
 
             def classify_song_source(url: str) -> tuple[bool, str]:
                 if not url:
@@ -395,8 +437,27 @@ class RadioToolApp:
                 allowed, _ = classify_song_source(url)
                 return allowed
 
+            def has_metadata_signal(song: SongInfo | None) -> bool:
+                if not song:
+                    return False
+                if song.artist and song.artist.strip():
+                    return True
+                if song.title and song.title.strip():
+                    return True
+                if song.stream_title and song.stream_title.strip():
+                    return True
+                return False
+
+            def publish_song_state(new_state: str) -> None:
+                nonlocal last_song_state
+                if new_state == last_song_state:
+                    return
+                last_song_state = new_state
+                self._results.put(("song_state", new_state))
+
             while not self._stop_event.is_set():
                 stream_song: SongInfo | None = None
+                feed_song: SongInfo | None = None
                 chosen_song: SongInfo | None = None
                 stream_song_is_track = False
                 stream_song_is_origin = False
@@ -480,6 +541,19 @@ class RadioToolApp:
                     probe_list = [preferred_feed_url] if preferred_feed_url else probe_candidates
                     feed_song = now_playing_discovery.fetch_now_playing(probe_list)
                     if feed_song and feed_song.artist and feed_song.title:
+                        if (
+                            strict_webplayer_mode
+                            and stream_song
+                            and not stream_song_is_track
+                            and feed_song.age_minutes is not None
+                            and feed_song.age_minutes >= NOWPLAYING_STALE_WITHOUT_STREAM_TRACK_MAX_AGE_MINUTES
+                        ):
+                            self.logger.log(
+                                "Feed-Treffer verworfen (veraltet ohne ICY-Track-Signal): "
+                                f"{feed_song.stream_title} ({feed_song.age_minutes} min alt)"
+                            )
+                            feed_song = None
+                    if feed_song and feed_song.artist and feed_song.title:
                         # Keep stream headers available in detail view where possible.
                         if stream_song and stream_song.source_headers:
                             feed_song.source_headers = stream_song.source_headers
@@ -508,13 +582,37 @@ class RadioToolApp:
                         self._results.put(("song", chosen_song))
                         last_song_key = song_key
                     consecutive_no_song_cycles = 0
+                    consecutive_empty_metadata_cycles = 0
                     reported_no_origin_song = False
+                    publish_song_state("PLAYING")
                 else:
                     consecutive_no_song_cycles += 1
-                    if last_song_key and consecutive_no_song_cycles >= SONG_CLEAR_EMPTY_CYCLES:
-                        self.logger.log("Songende erkannt: aktuell kein eindeutiger Song (Jingle/Beitrag/Nachrichten)")
-                        last_song_key = ""
-                        self._results.put(("song_cleared", None))
+                    poll_has_metadata = has_metadata_signal(stream_song) or has_metadata_signal(feed_song)
+                    if poll_has_metadata:
+                        publish_song_state("MAYBE_ENDED")
+                    else:
+                        publish_song_state("NO_METADATA")
+                    if poll_has_metadata:
+                        consecutive_empty_metadata_cycles = 0
+                    else:
+                        consecutive_empty_metadata_cycles += 1
+
+                    if last_song_key:
+                        end_due_empty = consecutive_empty_metadata_cycles >= SONG_END_EMPTY_METADATA_CYCLES
+                        end_due_inconclusive = consecutive_no_song_cycles >= SONG_CLEAR_EMPTY_CYCLES
+                        if end_due_empty or end_due_inconclusive:
+                            if end_due_empty:
+                                self.logger.log(
+                                    "Songende erkannt: wiederholt leere Metadaten (vermutlich kein Song aktiv)"
+                                )
+                            else:
+                                self.logger.log(
+                                    "Songende erkannt: aktuell kein eindeutiger Song (Jingle/Beitrag/Nachrichten)"
+                                )
+                            last_song_key = ""
+                            self._results.put(("song_cleared", None))
+                            consecutive_no_song_cycles = 0
+                            consecutive_empty_metadata_cycles = 0
 
                     if restricted_source_mode:
                         self.logger.log("Keine Quelle mit eindeutigem Artist in diesem Poll-Zyklus")
@@ -673,3 +771,7 @@ def run_app() -> None:
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    run_app()
