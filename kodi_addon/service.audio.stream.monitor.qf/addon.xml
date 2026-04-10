@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<addon id="service.audio.stream.monitor.qf" name="Audio Stream Monitor QF" provider-name="blauesgruen" version="0.1.1">
+  <requires>
+    <import addon="xbmc.python" version="3.0.0"/>
+  </requires>
+  <extension point="xbmc.service" library="service.py" start="login" />
+  <extension point="xbmc.addon.metadata">
+    <platform>all</platform>
+    <license>MIT</license>
+    <language>de</language>
+    <summary lang="de_DE">Provider Finder Bridge fuer ASM</summary>
+    <summary lang="en_GB">Provider Finder bridge for ASM</summary>
+    <description lang="de_DE">Verarbeitet ASM-QF Requests ueber Window-Properties und liefert Artist/Title aus Provider Finder.</description>
+    <description lang="en_GB">Processes ASM-QF requests via window properties and returns artist/title from Provider Finder.</description>
+  </extension>
+</addon>

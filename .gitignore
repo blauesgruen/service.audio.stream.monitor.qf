@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .idea/
 radio_sources.db
+SESSION_MEMORY_*.md

@@ -1,0 +1,28 @@
+# Kodi Media Center language file
+# Addon Name: Audio Stream Monitor QF
+# Addon id: service.audio.stream.monitor.qf
+# Addon Provider: blauesgruen
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgctxt "#32020"
+msgid "Data"
+msgstr ""
+
+msgctxt "#32050"
+msgid "Search original sources on the web"
+msgstr "Enable ASM-QF bridge"
+
+msgctxt "#32051"
+msgid "Searches the web for official station origin sources (source finder). Can provide additional song metadata."
+msgstr "If disabled, requests are answered with status 'blocked'."
+
+msgctxt "#32070"
+msgid "Provider Finder project path"
+msgstr ""
+
+msgctxt "#32071"
+msgid "Filesystem path to the provider_finder project root used by this bridge."
+msgstr ""

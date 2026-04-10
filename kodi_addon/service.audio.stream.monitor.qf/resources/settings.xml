@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<settings version="1">
+    <section id="service.audio.stream.monitor.qf">
+        <category id="data" label="32020" help="">
+            <group id="1" label="32020">
+                <setting id="provider_finder_enabled" type="boolean" label="32050" help="32051">
+                    <level>0</level>
+                    <default>false</default>
+                    <control type="toggle" />
+                </setting>
+                <setting id="provider_finder_project_path" type="string" label="32070" help="32071">
+                    <level>0</level>
+                    <default>C:\Users\zorno\PycharmProjects\service.audio.stream.monitor.qf</default>
+                    <control type="edit" format="string" />
+                </setting>
+            </group>
+        </category>
+    </section>
+</settings>
