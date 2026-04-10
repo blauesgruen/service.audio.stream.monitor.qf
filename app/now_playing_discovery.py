@@ -31,7 +31,7 @@ ARTIST_KEYS = {"artist", "author", "interpret", "performer", "band", "artistname
 STATUS_KEYS = {"status", "state", "playstate", "onair", "current", "isplaying"}
 TIME_KEYS = {"starttime", "start", "timestamp", "time", "date", "datetime"}
 DURATION_KEYS = {"duration", "length", "duration_sec", "duration_seconds", "runtime"}
-HTML_TITLE_CLASS_KEYS = ("js_title", "songtitle", "tracktitle", "title", "track", "song", "songname", "trackname")
+HTML_TITLE_CLASS_KEYS = ("js_title", "songtitle", "tracktitle", "title", "titel", "track", "song", "songname", "trackname")
 HTML_ARTIST_CLASS_KEYS = ("js_artist", "interpret", "artist", "artistname", "performer", "band", "author")
 
 
@@ -503,9 +503,15 @@ class NowPlayingDiscoveryService:
                 "nowplaying",
                 "currenttitle",
                 "currentsong",
-                "songs.html",
-                "songs.htm",
+                "/songs.html",
+                "/songs.htm",
+                "/playlist/",
+                "playlist-",
                 "playlist/index.jsp",
+                "playlist/index.html",
+                "titelsuche",
+                "radioplayerplaylist",
+                "jetztimprogramm",
                 "radiomodul",
             )
         )
@@ -833,7 +839,32 @@ class NowPlayingDiscoveryService:
         return "", ""
 
     def _extract_html_song_candidates(self, payload: str) -> list[tuple[int, str, str]]:
-        blocks = re.findall(r"<li\b[^>]*>.*?</li>", payload, flags=re.IGNORECASE | re.DOTALL)
+        li_blocks = re.findall(r"<li\b[^>]*>.*?</li>", payload, flags=re.IGNORECASE | re.DOTALL)
+        table_blocks = re.findall(r"<tr\b[^>]*>.*?</tr>", payload, flags=re.IGNORECASE | re.DOTALL)
+        blocks = []
+        for block in li_blocks:
+            lower_block = block.lower()
+            class_haystack = " ".join(re.findall(r'class=["\']([^"\']+)["\']', block, flags=re.IGNORECASE)).lower()
+            has_list_hint = any(
+                hint in class_haystack
+                for hint in (
+                    "playlist",
+                    "song",
+                    "track",
+                    "js_title",
+                    "js_artist",
+                    "interpret",
+                    "performer",
+                    "current",
+                    "now",
+                    "onair",
+                )
+            )
+            has_time_hint = "datetime=" in lower_block or "<time" in lower_block
+            if not (has_list_hint or has_time_hint):
+                continue
+            blocks.append(block)
+        blocks.extend(table_blocks)
         if not blocks:
             return []
 
@@ -841,12 +872,26 @@ class NowPlayingDiscoveryService:
         for block in blocks:
             artist = self._extract_html_class_value(block, HTML_ARTIST_CLASS_KEYS).strip()
             title = self._extract_html_class_value(block, HTML_TITLE_CLASS_KEYS).strip()
+            if not (artist and title):
+                strong_artist, strong_title = self._extract_html_strong_pair(block)
+                if not artist and strong_artist:
+                    artist = strong_artist
+                if not title and strong_title:
+                    title = strong_title
+            if not (artist and title):
+                row_artist, row_title = self._extract_html_table_row_pair(block)
+                if not artist and row_artist:
+                    artist = row_artist
+                if not title and row_title:
+                    title = row_title
             if title and not artist:
                 split_artist, split_title = self._split_compound_title(title)
                 if split_artist and split_title:
                     artist = split_artist
                     title = split_title
             if not artist and not title:
+                continue
+            if self._looks_like_html_header_value(title, artist):
                 continue
             if self._looks_like_placeholder_title(title, artist):
                 continue
@@ -874,6 +919,69 @@ class NowPlayingDiscoveryService:
             candidates.append((score, artist, title))
 
         return candidates
+
+    def _extract_html_strong_pair(self, payload: str) -> tuple[str, str]:
+        lower_payload = payload.lower()
+        if not any(hint in lower_payload for hint in ("playlist", "song", "track", "now", "onair", "current")):
+            return "", ""
+
+        connector_match = re.search(
+            r"<strong[^>]*>(?P<artist>.*?)</strong>\s*(?:mit|with|by|von)\s*<strong[^>]*>(?P<title>.*?)</strong>",
+            payload,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if connector_match:
+            artist = self._clean_html_text(connector_match.group("artist"))
+            title = self._clean_html_text(connector_match.group("title"))
+            if len(artist) >= 2 and len(title) >= 2:
+                return artist, title
+
+        return "", ""
+
+    def _extract_html_table_row_pair(self, payload: str) -> tuple[str, str]:
+        cells_raw = re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", payload, flags=re.IGNORECASE | re.DOTALL)
+        if len(cells_raw) < 2:
+            return "", ""
+
+        cells = [self._clean_html_text(cell) for cell in cells_raw]
+        cells = [cell for cell in cells if cell]
+        if len(cells) < 2:
+            return "", ""
+
+        if len(cells) >= 3:
+            title = cells[-2].strip()
+            artist = cells[-1].strip()
+        else:
+            title = cells[0].strip()
+            artist = cells[1].strip()
+
+        if not title and not artist:
+            return "", ""
+        return artist, title
+
+    def _looks_like_html_header_value(self, title: str, artist: str) -> bool:
+        title_lower = (title or "").strip().lower()
+        artist_lower = (artist or "").strip().lower()
+        if not title_lower and not artist_lower:
+            return True
+
+        headers = {
+            "datum",
+            "datum und uhrzeit",
+            "uhrzeit",
+            "coverbild",
+            "cover",
+            "titel",
+            "title",
+            "song",
+            "track",
+            "interpret",
+            "artist",
+            "performer",
+            "komponist",
+            "composer",
+        }
+        return title_lower in headers and artist_lower in headers
 
     def _generate_html_nowplaying_variants(self, url: str) -> set[str]:
         variants = set()
@@ -1002,9 +1110,31 @@ class NowPlayingDiscoveryService:
 
     def _extract_html_datetime(self, payload: str) -> str:
         match = re.search(r'datetime=["\']([^"\']+)["\']', payload, flags=re.IGNORECASE)
-        if not match:
-            return ""
-        return (match.group(1) or "").strip()
+        if match:
+            return (match.group(1) or "").strip()
+
+        clean = self._clean_html_text(payload)
+        datetime_match = re.search(
+            r"(?P<day>\d{1,2})\.(?P<month>\d{1,2})\.(?P<year>\d{4})\s*,?\s*(?P<hour>\d{1,2})[.:](?P<minute>\d{2})\s*(?:uhr)?",
+            clean,
+            flags=re.IGNORECASE,
+        )
+        if datetime_match:
+            day = int(datetime_match.group("day"))
+            month = int(datetime_match.group("month"))
+            year = int(datetime_match.group("year"))
+            hour = int(datetime_match.group("hour"))
+            minute = int(datetime_match.group("minute"))
+            return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:00"
+
+        time_match = re.search(r"(?<!\d)(?P<hour>\d{1,2})[.:](?P<minute>\d{2})\s*(?:uhr)?", clean, flags=re.IGNORECASE)
+        if time_match:
+            hour = int(time_match.group("hour"))
+            minute = int(time_match.group("minute"))
+            now = datetime.now()
+            return f"{now.year:04d}-{now.month:02d}-{now.day:02d} {hour:02d}:{minute:02d}:00"
+
+        return ""
 
     def _extract_html_class_value(self, payload: str, class_keys: tuple[str, ...]) -> str:
         for class_key in class_keys:
@@ -1093,6 +1223,39 @@ class NowPlayingDiscoveryService:
         text = (value or "").strip()
         if not text:
             return None
+
+        local_match = re.match(
+            r"^(?P<day>\d{1,2})\.(?P<month>\d{1,2})\.(?P<year>\d{4})\s*,?\s*(?P<hour>\d{1,2})[.:](?P<minute>\d{2})(?::(?P<second>\d{2}))?\s*(?:uhr)?$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if local_match:
+            second = int(local_match.group("second") or 0)
+            return datetime(
+                int(local_match.group("year")),
+                int(local_match.group("month")),
+                int(local_match.group("day")),
+                int(local_match.group("hour")),
+                int(local_match.group("minute")),
+                second,
+            )
+
+        time_only_match = re.match(
+            r"^(?P<hour>\d{1,2})[.:](?P<minute>\d{2})(?::(?P<second>\d{2}))?\s*(?:uhr)?$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if time_only_match:
+            second = int(time_only_match.group("second") or 0)
+            now = datetime.now()
+            return datetime(
+                now.year,
+                now.month,
+                now.day,
+                int(time_only_match.group("hour")),
+                int(time_only_match.group("minute")),
+                second,
+            )
 
         for fmt in (
             "%Y-%m-%d %H:%M:%S",
