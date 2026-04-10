@@ -7,6 +7,9 @@ from urllib.parse import urlparse
 
 from .config import NON_ORIGIN_ASSET_BASE_DOMAINS, NON_ORIGIN_DIRECTORY_BASE_DOMAINS
 
+TOKEN_SEPARATOR_RE = re.compile(r"[\W_]+", flags=re.UNICODE)
+UNICODE_LETTER_RE = re.compile(r"[^\W\d_]", flags=re.UNICODE)
+
 
 def is_probable_url(value: str) -> bool:
     parsed = urlparse(value.strip())
@@ -59,3 +62,28 @@ def is_non_origin_directory_url(url: str) -> bool:
     if host.startswith("radio.") or host.startswith("www.radio.") or ".radio." in host:
         return True
     return False
+
+
+def normalize_for_token_search(value: str) -> str:
+    text = (value or "").lower()
+    return TOKEN_SEPARATOR_RE.sub(" ", text).strip()
+
+
+def split_search_tokens(value: str) -> list[str]:
+    cleaned = normalize_for_token_search(value)
+    if not cleaned:
+        return []
+    return [token for token in cleaned.split() if token]
+
+
+def has_unicode_letter(value: str) -> bool:
+    return bool(UNICODE_LETTER_RE.search(value or ""))
+
+
+def is_mixed_alnum_token(token: str, min_length: int = 2) -> bool:
+    token = (token or "").strip()
+    if len(token) < min_length:
+        return False
+    has_digit = any(char.isdigit() for char in token)
+    has_alpha = any(char.isalpha() for char in token)
+    return has_digit and has_alpha
