@@ -66,6 +66,7 @@ class StationLookupService:
         search_queries = self._build_search_queries(query_clean, lookup_queries)
 
         for lookup_query in lookup_queries:
+            query_candidates: list[StationMatch] = []
             for base_url in RADIO_BROWSER_BASE_URLS:
                 endpoint = (
                     f"{base_url}/json/stations/byname/{quote(lookup_query)}"
@@ -84,35 +85,23 @@ class StationLookupService:
                 candidates = self._extract_candidates(payload)
                 if candidates:
                     collected.extend(candidates)
+                    query_candidates.extend(candidates)
                     break
-            if collected:
+            if query_candidates and any(
+                self._is_confident_station_match(candidate, query_clean) for candidate in query_candidates
+            ):
                 break
 
         if not collected:
-            for search_query in search_queries:
-                for base_url in RADIO_BROWSER_BASE_URLS:
-                    endpoint = (
-                        f"{base_url}/json/stations/search"
-                        f"?name={quote(search_query)}"
-                        f"&hidebroken=true&limit={RADIO_BROWSER_SEARCH_LOOKUP_LIMIT}&order=votes&reverse=true"
-                    )
-                    self._log(f"Sender-Suche (search) gegen: {base_url} (query='{search_query}')")
-                    try:
-                        request = Request(endpoint, headers={"User-Agent": USER_AGENT})
-                        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                            payload = json.load(response)
-                    except Exception as err:
-                        errors.append(f"{base_url} [search:{search_query}]: {err}")
-                        continue
-
-                    successful_requests += 1
-                    candidates = self._extract_candidates(payload)
-                    if candidates:
-                        collected.extend(candidates)
-                        used_search_fallback = True
-                        break
-                if collected:
-                    break
+            search_candidates, search_successful_requests = self._collect_search_candidates(
+                query_clean,
+                search_queries,
+                errors,
+            )
+            successful_requests += search_successful_requests
+            if search_candidates:
+                collected.extend(search_candidates)
+                used_search_fallback = True
 
         if not collected:
             fallback_station = self._fallback_web_directory_station(query_clean)
@@ -136,6 +125,25 @@ class StationLookupService:
         best = ranked[0]
 
         if not self._is_confident_station_match(best, query_clean):
+            if not used_search_fallback:
+                search_candidates, search_successful_requests = self._collect_search_candidates(
+                    query_clean,
+                    search_queries,
+                    errors,
+                )
+                successful_requests += search_successful_requests
+                if search_candidates:
+                    used_search_fallback = True
+                    deduped = self._dedupe_candidates([*deduped, *search_candidates])
+                    ranked = sorted(deduped, key=lambda station: self._score_station(station, query_clean), reverse=True)
+                    best = ranked[0]
+                    if self._is_confident_station_match(best, query_clean):
+                        self._log(
+                            "Sender-Match (Search-Refine): "
+                            f"{best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
+                        )
+                        return best
+
             if used_search_fallback:
                 self._log(
                     "Search-Fallback Treffer verworfen (zu geringe Token-Deckung): "
@@ -170,6 +178,46 @@ class StationLookupService:
             f"Sender-Match: {best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
         )
         return best
+
+    def _collect_search_candidates(
+        self,
+        query: str,
+        search_queries: list[str],
+        errors: list[str],
+    ) -> tuple[list[StationMatch], int]:
+        collected: list[StationMatch] = []
+        successful_requests = 0
+
+        for search_query in search_queries:
+            query_candidates: list[StationMatch] = []
+            for base_url in RADIO_BROWSER_BASE_URLS:
+                endpoint = (
+                    f"{base_url}/json/stations/search"
+                    f"?name={quote(search_query)}"
+                    f"&hidebroken=true&limit={RADIO_BROWSER_SEARCH_LOOKUP_LIMIT}&order=votes&reverse=true"
+                )
+                self._log(f"Sender-Suche (search) gegen: {base_url} (query='{search_query}')")
+                try:
+                    request = Request(endpoint, headers={"User-Agent": USER_AGENT})
+                    with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                        payload = json.load(response)
+                except Exception as err:
+                    errors.append(f"{base_url} [search:{search_query}]: {err}")
+                    continue
+
+                successful_requests += 1
+                candidates = self._extract_candidates(payload)
+                if candidates:
+                    query_candidates.extend(candidates)
+                    collected.extend(candidates)
+                    break
+
+            if query_candidates and any(
+                self._is_confident_station_match(candidate, query) for candidate in query_candidates
+            ):
+                break
+
+        return collected, successful_requests
 
     def _extract_candidates(self, payload: list[dict]) -> list[StationMatch]:
         candidates: list[StationMatch] = []
@@ -558,7 +606,8 @@ class StationLookupService:
             seen.add(key)
             queries.append(value.strip())
 
-        for lookup_query in lookup_queries:
+        max_lookup_seed = max(1, STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS // 2)
+        for lookup_query in lookup_queries[:max_lookup_seed]:
             add(lookup_query)
             if len(queries) >= STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS:
                 return queries
@@ -576,6 +625,7 @@ class StationLookupService:
                 and token not in STATION_LOOKUP_SKIP_PREFIX_TOKENS
                 and (
                     len(token) >= STATION_LOOKUP_SEARCH_MIN_TOKEN_LENGTH
+                    or (token.isdigit() and len(token) >= 2)
                     or self._is_significant_short_token(token)
                 )
             )
@@ -583,6 +633,10 @@ class StationLookupService:
 
         if filtered_tokens:
             add(" ".join(filtered_tokens))
+            if len(filtered_tokens) >= 2:
+                add(" ".join(filtered_tokens[-2:]))
+            if len(filtered_tokens) >= 3:
+                add(" ".join(filtered_tokens[-3:]))
             for token in filtered_tokens:
                 add(token)
                 if len(queries) >= STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS:
@@ -628,6 +682,14 @@ class StationLookupService:
         missing = [(token, pos) for token, pos in query_tokens_with_pos if token not in station_tokens]
         if not missing:
             return True
+
+        missing_alpha = [token for token, _ in missing if not token.isdigit()]
+        if not missing_alpha:
+            query_alpha_tokens = [token for token, _ in query_tokens_with_pos if not token.isdigit()]
+            if len(query_alpha_tokens) >= 3:
+                alpha_overlap = {token for token in query_alpha_tokens if token in station_tokens}
+                if len(alpha_overlap) >= 3:
+                    return True
 
         if len(missing) == 1:
             missing_token, missing_pos = missing[0]

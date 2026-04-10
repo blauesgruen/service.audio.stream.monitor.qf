@@ -21,6 +21,7 @@ class SongInfo:
     raw_metadata: str
     artist: str = ""
     title: str = ""
+    age_minutes: int | None = None
     source_kind: str = "stream_icy"
     source_url: str = ""
     source_approval: str = ""
