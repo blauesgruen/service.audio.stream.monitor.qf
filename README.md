@@ -5,11 +5,12 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 ## Features
 - Eingabe eines Sendernamens oder einer Sender-/Playlist-URL
 - Automatische Sender-Suche per Name (Radio-Browser API)
+- Sendernamen-Lookup mit generischen Token-Varianten (z. B. Teilphrasen), ohne sender-spezifische Sonderfaelle
 - Auflösung zur Original-Stream-Quelle (Redirects + `m3u`/`pls`/`xspf`)
 - Generische Now-Playing-Discovery (keine sender-spezifischen Hardcodes)
 - Abruf der aktuellen Songinfo per ICY-Metadaten (`StreamTitle`)
 - Discovery laeuft auch weiter, wenn ICY keinen `StreamTitle` liefert
-- Bevorzugte Nutzung externer Feed-Quellen (`XML`/`JSON`) mit `artist/title`, falls auffindbar
+- Bevorzugte Nutzung externer Feed-Quellen (`XML`/`JSON`/`HTML`) mit `artist/title`, falls auffindbar
 - Generische Icecast/Shoutcast-Statusquellen werden mitberuecksichtigt (`status-json.xsl`, `status.xsl`, `stats`)
 - Anzeige der tatsächlich genutzten Song-Quelle (`source_url`) im Quell-Details-Fenster
 - `Origin-only` aktiv mit optionaler `offizieller Player-Kette`:
