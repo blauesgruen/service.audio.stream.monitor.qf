@@ -8,11 +8,6 @@
                     <default>false</default>
                     <control type="toggle" />
                 </setting>
-                <setting id="provider_finder_project_path" type="string" label="32070" help="32071">
-                    <level>0</level>
-                    <default>C:\Users\zorno\PycharmProjects\service.audio.stream.monitor.qf</default>
-                    <control type="edit" format="string" />
-                </setting>
             </group>
         </category>
     </section>

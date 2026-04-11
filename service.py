@@ -91,18 +91,22 @@ class QFBridgeService(xbmc.Monitor):
             return bool(default)
 
     def _get_project_root(self):
-        root = (self.addon.getSetting("provider_finder_project_path") or "").strip()
+        root = xbmc.translatePath(self.addon.getAddonInfo("path") or "").strip()
         return root
 
     def _ensure_imports(self):
         root = self._get_project_root()
         if not root:
             self._imports_ready = False
-            self._import_error = "provider_finder_project_path ist leer"
+            self._import_error = "Addon-Pfad ist leer"
             return False
         if not os.path.isdir(root):
             self._imports_ready = False
-            self._import_error = f"provider_finder_project_path nicht gefunden: {root}"
+            self._import_error = f"Addon-Pfad nicht gefunden: {root}"
+            return False
+        if not os.path.isdir(os.path.join(root, "app")):
+            self._imports_ready = False
+            self._import_error = f"Addon ist nicht self-contained (app/ fehlt): {root}"
             return False
 
         if self._imports_ready and self._import_root == root:

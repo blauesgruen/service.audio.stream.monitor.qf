@@ -18,11 +18,3 @@ msgstr "ASM-QF Bridge aktivieren"
 msgctxt "#32051"
 msgid "Searches the web for official station origin sources (source finder). Can provide additional song metadata."
 msgstr "Wenn deaktiviert, werden Requests mit Status 'blocked' beantwortet."
-
-msgctxt "#32070"
-msgid "Provider Finder project path"
-msgstr "Provider-Finder-Projektpfad"
-
-msgctxt "#32071"
-msgid "Filesystem path to the provider_finder project root used by this bridge."
-msgstr "Dateisystem-Pfad zum provider_finder-Projektordner."
