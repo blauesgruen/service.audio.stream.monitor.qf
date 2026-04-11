@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import sys
 import time
 
@@ -23,6 +24,10 @@ RES_SOURCE = "RadioMonitor.QF.Response.Source"
 RES_REASON = "RadioMonitor.QF.Response.Reason"
 RES_META = "RadioMonitor.QF.Response.Meta"
 RES_TS = "RadioMonitor.QF.Response.Ts"
+
+SHARED_DB_ADDON_ID = "service.audio.stream.monitor"
+QF_ADDON_ID = "service.audio.stream.monitor.qf"
+QF_VERIFIED_SOURCE_KIND = "qf_verified"
 
 
 def _log(message, level=xbmc.LOGINFO):
@@ -159,6 +164,139 @@ class QFBridgeService(xbmc.Monitor):
 
         return domains
 
+    def _normalize_station_name(self, value):
+        return " ".join(str(value or "").strip().lower().split())
+
+    def _normalize_url(self, value):
+        return str(value or "").strip().lower()
+
+    def _build_station_key(self, station_name):
+        name_norm = self._normalize_station_name(station_name)
+        if not name_norm:
+            return ""
+        return f"name:{name_norm}"
+
+    def _get_shared_db_path(self):
+        return xbmc.translatePath(
+            f"special://userdata/addon_data/{SHARED_DB_ADDON_ID}/song_data.db"
+        )
+
+    def _ensure_verified_sources_schema(self, conn):
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS verified_station_sources (
+                station_key       TEXT NOT NULL,
+                station_name      TEXT NOT NULL DEFAULT '',
+                station_name_norm TEXT NOT NULL DEFAULT '',
+                source_url        TEXT NOT NULL,
+                source_url_norm   TEXT NOT NULL,
+                source_kind       TEXT NOT NULL DEFAULT 'stream',
+                verified_by       TEXT NOT NULL DEFAULT '',
+                confidence        REAL NOT NULL DEFAULT 1.0,
+                verified_at_utc   TEXT NOT NULL DEFAULT '',
+                last_seen_ts      INTEGER NOT NULL DEFAULT 0,
+                meta_json         TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (station_key, source_url_norm)
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_verified_sources_url_norm
+            ON verified_station_sources(source_url_norm);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_verified_sources_station_norm
+            ON verified_station_sources(station_name_norm);
+            """
+        )
+
+    def _record_verified_source(
+        self,
+        station_name,
+        source_url,
+        confidence=0.95,
+        meta=None,
+    ):
+        station_key = self._build_station_key(station_name)
+        station_name = str(station_name or "").strip()
+        station_name_norm = self._normalize_station_name(station_name)
+        source_url = str(source_url or "").strip()
+        source_url_norm = self._normalize_url(source_url)
+        if not station_key or not source_url or not source_url_norm:
+            return False
+
+        db_path = self._get_shared_db_path()
+        db_dir = os.path.dirname(db_path)
+        if db_dir and not os.path.isdir(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+
+        confidence = max(0.0, min(1.0, float(confidence)))
+        last_seen_ts = int(time.time())
+        verified_at_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_seen_ts))
+        meta_json = ""
+        if meta:
+            try:
+                meta_json = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
+            except Exception:
+                meta_json = ""
+
+        try:
+            conn = sqlite3.connect(db_path, timeout=2.0)
+            try:
+                self._ensure_verified_sources_schema(conn)
+                conn.execute(
+                    """
+                    INSERT INTO verified_station_sources (
+                        station_key,
+                        station_name,
+                        station_name_norm,
+                        source_url,
+                        source_url_norm,
+                        source_kind,
+                        verified_by,
+                        confidence,
+                        verified_at_utc,
+                        last_seen_ts,
+                        meta_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(station_key, source_url_norm) DO UPDATE SET
+                        station_name=excluded.station_name,
+                        station_name_norm=excluded.station_name_norm,
+                        source_url=excluded.source_url,
+                        source_kind=excluded.source_kind,
+                        verified_by=excluded.verified_by,
+                        confidence=excluded.confidence,
+                        verified_at_utc=excluded.verified_at_utc,
+                        last_seen_ts=excluded.last_seen_ts,
+                        meta_json=excluded.meta_json
+                    """,
+                    (
+                        station_key,
+                        station_name,
+                        station_name_norm,
+                        source_url,
+                        source_url_norm,
+                        QF_VERIFIED_SOURCE_KIND,
+                        QF_ADDON_ID,
+                        confidence,
+                        verified_at_utc,
+                        last_seen_ts,
+                        meta_json,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as err:
+            _log(f"Verified-Source Upsert fehlgeschlagen: {err}", xbmc.LOGDEBUG)
+            return False
+
+        return True
+
     def _resolve_song(self, station_input):
         lookup = self.StationLookupService(lambda msg: _log(msg, xbmc.LOGDEBUG))
         resolver = self.StreamResolver(lambda msg: _log(msg, xbmc.LOGDEBUG))
@@ -208,6 +346,19 @@ class QFBridgeService(xbmc.Monitor):
         if stream_song and stream_song.artist and stream_song.title:
             allowed, approval = classify_source(stream_song.source_url)
             if allowed:
+                verified_source_url = (stream_song.source_url or "").strip() or resolved.resolved_url
+                self._record_verified_source(
+                    station_name=station.name if station else station_input,
+                    source_url=verified_source_url,
+                    confidence=0.95,
+                    meta={
+                        "station_input": station_input,
+                        "source_approval": approval,
+                        "source_kind_raw": stream_song.source_kind,
+                        "resolved_url": resolved.resolved_url,
+                        "delivery_url": resolved.delivery_url or "",
+                    },
+                )
                 return {
                     "status": "hit",
                     "artist": stream_song.artist,
@@ -236,6 +387,19 @@ class QFBridgeService(xbmc.Monitor):
         if feed_song and feed_song.artist and feed_song.title:
             allowed, approval = classify_source(feed_song.source_url)
             if allowed:
+                verified_source_url = (feed_song.source_url or "").strip() or resolved.resolved_url
+                self._record_verified_source(
+                    station_name=station.name if station else station_input,
+                    source_url=verified_source_url,
+                    confidence=0.95,
+                    meta={
+                        "station_input": station_input,
+                        "source_approval": approval,
+                        "source_kind_raw": feed_song.source_kind,
+                        "resolved_url": resolved.resolved_url,
+                        "delivery_url": resolved.delivery_url or "",
+                    },
+                )
                 return {
                     "status": "hit",
                     "artist": feed_song.artist,
