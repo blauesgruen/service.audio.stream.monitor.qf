@@ -34,10 +34,46 @@ def _log(message, level=xbmc.LOGINFO):
     xbmc.log(f"[ASM-QF] {message}", level)
 
 
+class QFLogger:
+    def _serialize_fields(self, fields):
+        parts = []
+        for key, value in fields.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+            parts.append(f"{key}={text}")
+        return " ".join(parts)
+
+    def emit(self, event, level=xbmc.LOGINFO, message="", **fields):
+        event_name = str(event or "").strip() or "event"
+        field_text = self._serialize_fields(fields)
+        chunks = [f"event={event_name}"]
+        if message:
+            chunks.append(str(message))
+        if field_text:
+            chunks.append(field_text)
+        _log(" | ".join(chunks), level=level)
+
+    def debug(self, event, message="", **fields):
+        self.emit(event=event, level=xbmc.LOGDEBUG, message=message, **fields)
+
+    def info(self, event, message="", **fields):
+        self.emit(event=event, level=xbmc.LOGINFO, message=message, **fields)
+
+    def warning(self, event, message="", **fields):
+        self.emit(event=event, level=xbmc.LOGWARNING, message=message, **fields)
+
+    def error(self, event, message="", **fields):
+        self.emit(event=event, level=xbmc.LOGERROR, message=message, **fields)
+
+
 class QFBridgeService(xbmc.Monitor):
     def __init__(self):
         super().__init__()
         self.addon = xbmcaddon.Addon()
+        self.logger = QFLogger()
         self.last_request_id = ""
         self._imports_ready = False
         self._import_root = ""
@@ -292,16 +328,27 @@ class QFBridgeService(xbmc.Monitor):
             finally:
                 conn.close()
         except Exception as err:
-            _log(f"Verified-Source Upsert fehlgeschlagen: {err}", xbmc.LOGDEBUG)
+            self.logger.warning(
+                "verified_source_upsert_failed",
+                message=str(err),
+                station_key=station_key,
+                source_url=source_url_norm,
+            )
             return False
 
+        self.logger.debug(
+            "verified_source_upsert_ok",
+            station_key=station_key,
+            source_url=source_url_norm,
+            confidence=confidence,
+        )
         return True
 
     def _resolve_song(self, station_input):
-        lookup = self.StationLookupService(lambda msg: _log(msg, xbmc.LOGDEBUG))
-        resolver = self.StreamResolver(lambda msg: _log(msg, xbmc.LOGDEBUG))
-        fetcher = self.SongMetadataFetcher(lambda msg: _log(msg, xbmc.LOGDEBUG))
-        discovery = self.NowPlayingDiscoveryService(lambda msg: _log(msg, xbmc.LOGDEBUG))
+        lookup = self.StationLookupService(lambda msg: self.logger.debug("core_trace", message=msg))
+        resolver = self.StreamResolver(lambda msg: self.logger.debug("core_trace", message=msg))
+        fetcher = self.SongMetadataFetcher(lambda msg: self.logger.debug("core_trace", message=msg))
+        discovery = self.NowPlayingDiscoveryService(lambda msg: self.logger.debug("core_trace", message=msg))
 
         station = None
         stream_seed = station_input
@@ -367,6 +414,12 @@ class QFBridgeService(xbmc.Monitor):
                     "reason": "station_name_match",
                     "meta": {**meta, "source_approval": approval, "source_url": stream_song.source_url},
                 }
+            self.logger.debug(
+                "song_source_blocked",
+                station=station.name if station else station_input,
+                source_url=stream_song.source_url,
+                source_kind=stream_song.source_kind,
+            )
             return {
                 "status": "blocked",
                 "artist": "",
@@ -408,6 +461,12 @@ class QFBridgeService(xbmc.Monitor):
                     "reason": "station_name_match",
                     "meta": {**meta, "source_approval": approval, "source_url": feed_song.source_url},
                 }
+            self.logger.debug(
+                "song_source_blocked",
+                station=station.name if station else station_input,
+                source_url=feed_song.source_url,
+                source_kind=feed_song.source_kind,
+            )
             return {
                 "status": "blocked",
                 "artist": "",
@@ -435,6 +494,13 @@ class QFBridgeService(xbmc.Monitor):
             return
 
         if not self._get_setting_bool("provider_finder_enabled", default=False):
+            self.logger.info(
+                "request_blocked",
+                req_id=req_id,
+                station=station,
+                mode=mode,
+                reason="qf_disabled",
+            )
             self._write_response(
                 req_id=req_id,
                 status="blocked",
@@ -444,6 +510,14 @@ class QFBridgeService(xbmc.Monitor):
             return
 
         if not self._ensure_imports():
+            self.logger.error(
+                "request_error",
+                req_id=req_id,
+                station=station,
+                mode=mode,
+                reason="import_failed",
+                error=self._import_error,
+            )
             self._write_response(
                 req_id=req_id,
                 status="error",
@@ -453,6 +527,12 @@ class QFBridgeService(xbmc.Monitor):
             return
 
         if not (station or "").strip():
+            self.logger.info(
+                "request_nohit",
+                req_id=req_id,
+                mode=mode,
+                reason="missing_station",
+            )
             self._write_response(
                 req_id=req_id,
                 status="no_hit",
@@ -463,6 +543,14 @@ class QFBridgeService(xbmc.Monitor):
 
         try:
             result = self._resolve_song(station.strip())
+            self.logger.info(
+                "request_result",
+                req_id=req_id,
+                station=station,
+                mode=mode,
+                status=result.get("status") or "error",
+                reason=result.get("reason") or "",
+            )
             self._write_response(
                 req_id=req_id,
                 status=result.get("status") or "error",
@@ -475,6 +563,14 @@ class QFBridgeService(xbmc.Monitor):
         except Exception as err:
             message = str(err)
             status = "timeout" if "timeout" in message.lower() else "error"
+            self.logger.error(
+                "request_exception",
+                req_id=req_id,
+                station=station,
+                mode=mode,
+                status=status,
+                error=message,
+            )
             self._write_response(
                 req_id=req_id,
                 status=status,
@@ -483,7 +579,7 @@ class QFBridgeService(xbmc.Monitor):
             )
 
     def run(self):
-        _log("Service gestartet", xbmc.LOGINFO)
+        self.logger.info("service_started")
         while not self.abortRequested():
             req_id = (WINDOW.getProperty(REQ_ID) or "").strip()
             if req_id and req_id != self.last_request_id:
@@ -491,13 +587,19 @@ class QFBridgeService(xbmc.Monitor):
                 station = WINDOW.getProperty(REQ_STATION) or ""
                 mode = WINDOW.getProperty(REQ_MODE) or ""
                 req_ts = WINDOW.getProperty(REQ_TS) or ""
-                _log(f"Neuer Request: id={req_id} station='{station}' mode='{mode}'", xbmc.LOGINFO)
+                self.logger.info(
+                    "request_received",
+                    req_id=req_id,
+                    station=station,
+                    mode=mode,
+                    request_ts=req_ts,
+                )
                 self._handle_request(req_id, station, mode, req_ts)
 
             if self.waitForAbort(0.25):
                 break
 
-        _log("Service beendet", xbmc.LOGINFO)
+        self.logger.info("service_stopped")
 
 
 if __name__ == "__main__":
