@@ -14,6 +14,7 @@ via Window `10000` properties.
 Request properties:
 - `RadioMonitor.QF.Request.Id`
 - `RadioMonitor.QF.Request.Station`
+- `RadioMonitor.QF.Request.StationId` (optional, preferred as stable station key)
 - `RadioMonitor.QF.Request.Mode`
 - `RadioMonitor.QF.Request.Ts`
 
