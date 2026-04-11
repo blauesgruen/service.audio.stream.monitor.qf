@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -225,10 +226,21 @@ class QFBridgeService(xbmc.Monitor):
     def _normalize_url(self, value):
         return str(value or "").strip().lower()
 
+    def _normalize_station_id(self, value):
+        text = str(value or "")
+        if not text:
+            return ""
+        text = re.sub(r"\[/?COLOR[^\]]*\]", " ", text, flags=re.IGNORECASE)
+        text = text.replace("•", " ")
+        text = " ".join(text.strip().lower().split())
+        if text.startswith("stationid:"):
+            text = text[len("stationid:") :].strip()
+        return text
+
     def _build_station_key(self, station_name, station_id=""):
-        station_id_norm = " ".join(str(station_id or "").strip().split())
+        station_id_norm = self._normalize_station_id(station_id)
         if station_id_norm:
-            return station_id_norm.lower()
+            return f"stationid:{station_id_norm}"
         name_norm = self._normalize_station_name(station_name)
         if not name_norm:
             return ""
@@ -301,6 +313,8 @@ class QFBridgeService(xbmc.Monitor):
                 meta_json = json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
             except Exception:
                 meta_json = ""
+        if not meta_json:
+            meta_json = json.dumps({"station_key": station_key}, ensure_ascii=False, separators=(",", ":"))
 
         try:
             conn = sqlite3.connect(db_path, timeout=2.0)
@@ -625,6 +639,7 @@ class QFBridgeService(xbmc.Monitor):
                     req_id=req_id,
                     station=station,
                     station_id=station_id,
+                    station_key_hint=self._build_station_key(station, station_id=station_id),
                     mode=mode,
                     request_ts=req_ts,
                 )
