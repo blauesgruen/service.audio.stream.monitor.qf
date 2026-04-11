@@ -6,7 +6,9 @@ via Window `10000` properties.
 ## Scope
 - Keeps existing `provider_finder` GUI unchanged (`python main.py`).
 - Adds an ASM bridge service with request/response contract.
-- Default state is disabled via setting `provider_finder_enabled=false`.
+- Default state is enabled via setting `provider_finder_enabled=true`.
+- Addon is self-contained (no external `provider_finder_project_path` setting required).
+- On successful hits, ASM-QF writes verified sources into ASM shared DB (`verified_station_sources`).
 
 ## ASM Contract
 Request properties:
