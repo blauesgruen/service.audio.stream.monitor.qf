@@ -33,6 +33,7 @@ if __package__:
     from .metadata import MetadataError, SongMetadataFetcher
     from .models import EpgInfo, ResolvedStream, SongInfo, StationMatch
     from .now_playing_discovery import NowPlayingDiscoveryService
+    from .song_validation import is_valid_song_candidate
     from .station_lookup import StationLookupError, StationLookupService
     from .stream_resolver import StreamResolveError, StreamResolver
     from .utils import get_base_domain, is_non_origin_directory_url, is_origin_url, is_probable_url
@@ -62,6 +63,7 @@ else:
     from app.metadata import MetadataError, SongMetadataFetcher
     from app.models import EpgInfo, ResolvedStream, SongInfo, StationMatch
     from app.now_playing_discovery import NowPlayingDiscoveryService
+    from app.song_validation import is_valid_song_candidate
     from app.station_lookup import StationLookupError, StationLookupService
     from app.stream_resolver import StreamResolveError, StreamResolver
     from app.utils import get_base_domain, is_non_origin_directory_url, is_origin_url, is_probable_url
@@ -490,7 +492,11 @@ class RadioToolApp:
                         last_stream_error = current_error
 
                 if stream_song:
-                    stream_song_is_track = bool(stream_song.artist and stream_song.title)
+                    stream_song_is_track = is_valid_song_candidate(
+                        stream_song.artist,
+                        stream_song.title,
+                        station_name=station.name if station else "",
+                    )
                     stream_song_is_origin, stream_song_approval = classify_song_source(stream_song.source_url)
                     if stream_song_is_track and not stream_song_is_origin:
                         rejected_non_origin_source = True
@@ -550,8 +556,15 @@ class RadioToolApp:
                     if preferred_feed_url and preferred_feed_url not in probe_candidates:
                         preferred_feed_url = ""
                     probe_list = [preferred_feed_url] if preferred_feed_url else probe_candidates
-                    feed_song = now_playing_discovery.fetch_now_playing(probe_list)
-                    if feed_song and feed_song.artist and feed_song.title:
+                    feed_song = now_playing_discovery.fetch_now_playing(
+                        probe_list,
+                        station_name=station.name if station else "",
+                    )
+                    if feed_song and is_valid_song_candidate(
+                        feed_song.artist,
+                        feed_song.title,
+                        station_name=station.name if station else "",
+                    ):
                         if (
                             strict_webplayer_mode
                             and stream_song
@@ -564,7 +577,11 @@ class RadioToolApp:
                                 f"{feed_song.stream_title} ({feed_song.age_minutes} min alt)"
                             )
                             feed_song = None
-                    if feed_song and feed_song.artist and feed_song.title:
+                    if feed_song and is_valid_song_candidate(
+                        feed_song.artist,
+                        feed_song.title,
+                        station_name=station.name if station else "",
+                    ):
                         # Keep stream headers available in detail view where possible.
                         if stream_song and stream_song.source_headers:
                             feed_song.source_headers = stream_song.source_headers
@@ -592,7 +609,11 @@ class RadioToolApp:
                     chosen_song.source_approval = stream_song_approval
                     reported_stream_deferred = False
 
-                if chosen_song and chosen_song.artist and chosen_song.title:
+                if chosen_song and is_valid_song_candidate(
+                    chosen_song.artist,
+                    chosen_song.title,
+                    station_name=station.name if station else "",
+                ):
                     song_key = "|".join(
                         [
                             chosen_song.source_url or "",

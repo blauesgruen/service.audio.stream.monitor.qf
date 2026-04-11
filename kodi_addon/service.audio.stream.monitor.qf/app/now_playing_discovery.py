@@ -25,6 +25,7 @@ from .config import (
     USER_AGENT,
 )
 from .models import ResolvedStream, SongInfo, StationMatch
+from .song_validation import is_valid_song_candidate
 from .utils import get_base_domain, is_mixed_alnum_token, is_probable_url, split_search_tokens
 
 TITLE_KEYS = {"title", "song", "track", "tracktitle", "songtitle", "songname", "trackname", "name"}
@@ -175,6 +176,11 @@ class NowPlayingDiscoveryService:
             candidates.add(derived)
             self._mark_trusted_candidate(derived)
 
+        loverad_flow_urls = self._discover_loverad_flow_urls(candidates, resolved, station)
+        for flow_url in loverad_flow_urls:
+            candidates.add(flow_url)
+            self._mark_trusted_candidate(flow_url)
+
         normalized_candidates = self._dedupe_url_variants(candidates)
         context_filtered_candidates = {
             url
@@ -201,7 +207,7 @@ class NowPlayingDiscoveryService:
             self._log("Keine Now-Playing Kandidaten gefunden")
         return limited
 
-    def fetch_now_playing(self, candidate_urls: list[str]) -> SongInfo | None:
+    def fetch_now_playing(self, candidate_urls: list[str], station_name: str = "") -> SongInfo | None:
         partial_match: SongInfo | None = None
         for url in candidate_urls[:DISCOVERY_MAX_CANDIDATES]:
             request_url = url if self._looks_like_html_nowplaying_endpoint(url) else self._cache_bust_url(url)
@@ -222,7 +228,7 @@ class NowPlayingDiscoveryService:
             if not song:
                 continue
 
-            if song.artist and song.title:
+            if is_valid_song_candidate(song.artist, song.title, station_name=station_name):
                 self._log(f"Now-Playing Treffer aus Feed: {url}")
                 return song
 
@@ -324,7 +330,14 @@ class NowPlayingDiscoveryService:
         return ""
 
     def _extract_urls_from_document(self, text: str, base_url: str) -> list[str]:
-        normalized_text = html.unescape(html.unescape(text)).replace("\\/", "/")
+        normalized_text = (
+            html.unescape(html.unescape(text))
+            .replace("\\/", "/")
+            .replace("\\u002f", "/")
+            .replace("\\u002F", "/")
+            .replace("\\u003a", ":")
+            .replace("\\u003A", ":")
+        )
         urls = set()
 
         for match in re.findall(r"https?://[^\"'`\s<>()]+", normalized_text, flags=re.IGNORECASE):
@@ -401,6 +414,7 @@ class NowPlayingDiscoveryService:
 
     def _looks_like_feed_url(self, url: str) -> bool:
         parsed = urlparse(url)
+        host = parsed.netloc.lower()
         path = parsed.path.lower()
         query = parsed.query.lower()
         haystack = f"{path}?{query}"
@@ -417,6 +431,10 @@ class NowPlayingDiscoveryService:
         if "status-json.xsl" in path:
             return True
         if path.endswith(".xsl") and "status" in path:
+            return True
+        if host.endswith("top-stream-service.loverad.io") and path.startswith("/v1/"):
+            return True
+        if host.startswith("iris-") and host.endswith(".loverad.io") and path.endswith("/flow.json"):
             return True
 
         if any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".mp4", ".m3u8")):
@@ -558,10 +576,13 @@ class NowPlayingDiscoveryService:
     def _candidate_score(self, url: str) -> int:
         lower = url.lower()
         parsed = urlparse(url)
+        host = parsed.netloc.lower()
         path_query = f"{parsed.path.lower()}?{parsed.query.lower()}"
         path = parsed.path.lower()
         query = parsed.query.lower()
         score = 0
+        if host.startswith("iris-") and host.endswith(".loverad.io") and path.endswith("/flow.json"):
+            score += 90
         if path.endswith(".xml"):
             score += 5
         if path.endswith(".json"):
@@ -638,8 +659,6 @@ class NowPlayingDiscoveryService:
             quality_score = 10 if title else 0
             quality_score += 7 if artist else 0
             score = status_score + quality_score
-            if self._looks_like_placeholder_title(title, artist):
-                score -= 80
 
             age_minutes = self._age_minutes(time_text)
             if age_minutes is not None:
@@ -710,7 +729,7 @@ class NowPlayingDiscoveryService:
         except json.JSONDecodeError:
             return None
 
-        candidates = []
+        candidates = self._extract_iris_flow_candidates(data)
         for node in self._walk_json_objects(data):
             title = self._extract_json_value(node, TITLE_KEYS)
             artist = self._extract_json_value(node, ARTIST_KEYS)
@@ -730,8 +749,6 @@ class NowPlayingDiscoveryService:
             if artist:
                 score += 8
             score += self._json_status_score(node)
-            if self._looks_like_placeholder_title(title, artist):
-                score -= 80
             age_minutes = self._age_minutes(time_text)
             if age_minutes is not None:
                 if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
@@ -767,6 +784,79 @@ class NowPlayingDiscoveryService:
             source_kind="web_feed_json",
             source_url=source_url,
         )
+
+    def _extract_iris_flow_candidates(
+        self,
+        data: dict | list,
+    ) -> list[tuple[int, str, str, str, str, int | None]]:
+        if not isinstance(data, dict):
+            return []
+
+        result = data.get("result")
+        if not isinstance(result, dict):
+            return []
+
+        entries = result.get("entry")
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            return []
+
+        candidates: list[tuple[int, str, str, str, str, int | None]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            time_text = self._extract_json_value(entry, TIME_KEYS)
+            duration_text = self._extract_json_value(entry, DURATION_KEYS)
+            song_root = entry.get("song")
+            if not isinstance(song_root, dict):
+                continue
+
+            song_entries = song_root.get("entry")
+            if isinstance(song_entries, dict):
+                song_entries = [song_entries]
+            if not isinstance(song_entries, list):
+                continue
+
+            for song_node in song_entries:
+                if not isinstance(song_node, dict):
+                    continue
+
+                title = self._extract_json_value(song_node, TITLE_KEYS)
+                if not title:
+                    continue
+
+                artist = ""
+                artist_root = song_node.get("artist")
+                if isinstance(artist_root, dict):
+                    artist_entries = artist_root.get("entry")
+                    if isinstance(artist_entries, dict):
+                        artist_entries = [artist_entries]
+                    if isinstance(artist_entries, list):
+                        for artist_node in artist_entries:
+                            if not isinstance(artist_node, dict):
+                                continue
+                            artist = self._extract_json_value(artist_node, ARTIST_KEYS | {"name", "realname"})
+                            if artist:
+                                break
+
+                if not artist:
+                    continue
+
+                score = 35
+                age_minutes = self._age_minutes(time_text)
+                if age_minutes is not None:
+                    if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
+                        score -= 120
+                    else:
+                        score += 20
+                if self._is_duration_window_expired(time_text, duration_text):
+                    score -= 120
+
+                candidates.append((score, artist, title, time_text, duration_text, age_minutes))
+
+        return candidates
 
     def _parse_html_payload(self, payload: str, source_url: str) -> SongInfo | None:
         if not payload:
@@ -804,11 +894,7 @@ class NowPlayingDiscoveryService:
 
         title = title.strip()
         artist = artist.strip()
-        if not title and not artist:
-            return None
-        if not artist or not title:
-            return None
-        if self._looks_like_placeholder_title(title, artist):
+        if not is_valid_song_candidate(artist, title):
             return None
 
         stream_title = f"{artist} - {title}".strip(" -")
@@ -908,7 +994,7 @@ class NowPlayingDiscoveryService:
                 continue
             if self._looks_like_html_header_value(title, artist):
                 continue
-            if self._looks_like_placeholder_title(title, artist):
+            if not is_valid_song_candidate(artist, title):
                 continue
 
             score = 0
@@ -1268,8 +1354,10 @@ class NowPlayingDiscoveryService:
                 yield from self._walk_json_objects(child)
 
     def _extract_json_value(self, node: dict, keyset: set[str]) -> str:
+        normalized_keyset = {re.sub(r"[^a-z0-9]", "", key.lower()) for key in keyset}
         for key, value in node.items():
-            if key.lower() not in keyset:
+            key_norm = re.sub(r"[^a-z0-9]", "", key.lower())
+            if key_norm not in normalized_keyset:
                 continue
             if isinstance(value, str):
                 return value.strip()
@@ -1375,22 +1463,6 @@ class NowPlayingDiscoveryService:
             return datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
             return None
-
-    def _looks_like_placeholder_title(self, title: str, artist: str) -> bool:
-        if artist and artist.strip():
-            return False
-        lower = (title or "").strip().lower()
-        if not lower:
-            return True
-        markers = (
-            "keine aktuelle",
-            "no current",
-            "no info",
-            "no information",
-            "unknown",
-            "unbekannt",
-        )
-        return any(marker in lower for marker in markers)
 
     def _build_generated_candidates(
         self,
@@ -1519,6 +1591,93 @@ class NowPlayingDiscoveryService:
                     config_urls.add(f"{scheme}://{netloc}/webradio/{mandate}/config.json")
 
         return config_urls
+
+    def _discover_loverad_flow_urls(
+        self,
+        known_candidates: set[str],
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> set[str]:
+        flow_urls = set()
+        station_name = (station.name if station else "") or resolved.station_name or ""
+
+        for candidate_url in sorted(known_candidates):
+            parsed = urlparse(candidate_url)
+            host = (parsed.netloc or "").lower()
+            if host != "top-stream-service.loverad.io":
+                continue
+
+            path_parts = [part for part in parsed.path.lower().split("/") if part]
+            if len(path_parts) < 2 or path_parts[0] != "v1":
+                continue
+            mandate = path_parts[1]
+            if not re.fullmatch(r"[a-z0-9-]{2,32}", mandate):
+                continue
+
+            payload_text, content_type = self._fetch_text(candidate_url)
+            if not payload_text:
+                continue
+            if not self._is_json_candidate(candidate_url, content_type, payload_text):
+                continue
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            best_station_id = ""
+            best_score = -1
+            for node in payload.values():
+                if not isinstance(node, dict):
+                    continue
+
+                station_id = self._extract_json_value(node, {"station_id", "stationid"})
+                if not station_id.isdigit():
+                    continue
+
+                stream_url = self._extract_json_value(
+                    node,
+                    {"url_low", "url_high", "stream_url", "streamurl", "url"},
+                )
+                channel_name = self._extract_json_value(
+                    node,
+                    {"stream", "name", "radio_name", "title", "channel"},
+                )
+
+                score = 0
+                if stream_url:
+                    if self._stream_url_matches(stream_url, resolved.resolved_url):
+                        score += 100
+                    if resolved.delivery_url and self._stream_url_matches(stream_url, resolved.delivery_url):
+                        score += 40
+                if station_name and channel_name and self._station_name_matches(channel_name, station_name):
+                    score += 25
+
+                if score > best_score:
+                    best_score = score
+                    best_station_id = station_id
+
+            if best_station_id:
+                iris_hosts = {f"iris-{mandate}.loverad.io"}
+                resolved_parts = [part for part in urlparse(resolved.resolved_url).path.lower().split("/") if part]
+                for part in resolved_parts:
+                    match = re.match(r"([a-z0-9]{2,8})[-_]", part)
+                    if not match:
+                        continue
+                    iris_hosts.add(f"iris-{match.group(1)}.loverad.io")
+                    break
+
+                for iris_host in sorted(iris_hosts):
+                    flow_url = f"https://{iris_host}/flow.json?station={best_station_id}&offset=1&count=1"
+                    probe_text, probe_type = self._fetch_text(flow_url)
+                    if not probe_text:
+                        continue
+                    if not self._is_json_candidate(flow_url, probe_type, probe_text):
+                        continue
+                    flow_urls.add(flow_url)
+
+        return flow_urls
 
     def _extract_channel_feed_urls(
         self,

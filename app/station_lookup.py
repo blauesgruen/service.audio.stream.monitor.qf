@@ -812,10 +812,26 @@ class StationLookupService:
                     continue
                 seen.add(key)
                 variants.append(candidate)
+                for dotted_variant in self._expand_frequency_decimal_variants(candidate):
+                    dotted_key = dotted_variant.lower()
+                    if dotted_key in seen:
+                        continue
+                    seen.add(dotted_key)
+                    variants.append(dotted_variant)
+                    if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
+                        return variants
                 compacted = self._compact_alpha_digit_tokens(candidate)
                 if compacted and compacted.lower() not in seen:
                     seen.add(compacted.lower())
                     variants.append(compacted)
+                    for dotted_variant in self._expand_frequency_decimal_variants(compacted):
+                        dotted_key = dotted_variant.lower()
+                        if dotted_key in seen:
+                            continue
+                        seen.add(dotted_key)
+                        variants.append(dotted_variant)
+                        if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
+                            return variants
                 if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
                     return variants
 
@@ -905,7 +921,8 @@ class StationLookupService:
     def _is_confident_station_match(self, station: StationMatch, query: str, station_id: str = "") -> bool:
         if not self._is_confident_search_match(station, query):
             return False
-        if not station_id and self._has_stream_channel_conflict(station, query):
+        source_type = str(station.raw_record.get("source") or "").strip().lower()
+        if source_type != "web_directory_fallback" and not station_id and self._has_stream_channel_conflict(station, query):
             return False
 
         query_tokens_with_pos = self._build_query_tokens_for_strict_match(query)
@@ -1093,6 +1110,36 @@ class StationLookupService:
         if compacted.lower() == value.lower():
             return ""
         return compacted
+
+    def _expand_frequency_decimal_variants(self, value: str) -> list[str]:
+        normalized = re.sub(r"\s+", " ", (value or "").strip())
+        if not normalized:
+            return []
+
+        candidates = [
+            re.sub(
+                r"\b([^\W\d_]{2,})([0-9]{3})\b",
+                lambda match: f"{match.group(1)} {match.group(2)[:2]}.{match.group(2)[2]}",
+                normalized,
+                flags=re.IGNORECASE,
+            ).strip(),
+            re.sub(
+                r"\b([^\W\d_]{2,})\s+([0-9]{3})\b",
+                lambda match: f"{match.group(1)} {match.group(2)[:2]}.{match.group(2)[2]}",
+                normalized,
+                flags=re.IGNORECASE,
+            ).strip(),
+        ]
+
+        variants: list[str] = []
+        seen = {normalized.lower()}
+        for candidate in candidates:
+            key = candidate.lower()
+            if not candidate or key in seen:
+                continue
+            seen.add(key)
+            variants.append(candidate)
+        return variants
 
     def _build_signature_tokens(self, value: str) -> set[str]:
         raw_tokens = split_search_tokens(value)

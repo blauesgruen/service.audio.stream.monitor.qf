@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 from .config import REQUEST_TIMEOUT_SECONDS, STREAM_READ_BYTES, USER_AGENT
 from .models import SongInfo
-from .utils import has_unicode_letter, normalize_for_token_search
+from .song_validation import is_valid_song_candidate
 
 
 class MetadataError(Exception):
@@ -127,49 +127,4 @@ class SongMetadataFetcher:
         return "", stream_title.strip()
 
     def _looks_like_song_pair(self, artist: str, title: str, station_name: str = "") -> bool:
-        if not artist or not title:
-            return False
-
-        artist_lower = artist.lower()
-        title_lower = title.lower()
-
-        # Ignore ID-like payloads such as "281085 - 393065".
-        if not has_unicode_letter(artist_lower):
-            return False
-        if (
-            re.fullmatch(r"[0-9][0-9 _.-]{2,}", artist_lower)
-            and re.fullmatch(r"[0-9][0-9 _.-]{2,}", title_lower)
-        ):
-            return False
-
-        blocked_artist_markers = (
-            "mdr",
-            "radio",
-            "jump",
-            "studio",
-            "livestream",
-            "traffic",
-            "verkehr",
-        )
-        if any(marker in artist_lower for marker in blocked_artist_markers):
-            return False
-
-        blocked_title_markers = (
-            "anruf",
-            "mikrofon",
-            "studio",
-            "verkehr",
-            "nachrichten",
-        )
-        if any(marker in title_lower for marker in blocked_title_markers):
-            return False
-
-        station_tokens = self._tokenize(station_name)
-        if station_tokens and (self._tokenize(artist) & station_tokens):
-            return False
-
-        return True
-
-    def _tokenize(self, value: str) -> set[str]:
-        cleaned = normalize_for_token_search(value)
-        return {token for token in cleaned.split() if len(token) >= 3}
+        return is_valid_song_candidate(artist, title, station_name=station_name)

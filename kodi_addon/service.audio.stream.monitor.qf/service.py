@@ -28,7 +28,6 @@ RES_REASON = "RadioMonitor.QF.Response.Reason"
 RES_META = "RadioMonitor.QF.Response.Meta"
 RES_TS = "RadioMonitor.QF.Response.Ts"
 
-SHARED_DB_ADDON_ID = "service.audio.stream.monitor"
 QF_ADDON_ID = "service.audio.stream.monitor.qf"
 QF_VERIFIED_SOURCE_KIND = "qf_verified"
 
@@ -136,6 +135,7 @@ class QFBridgeService(xbmc.Monitor):
             from app.config import ALLOW_OFFICIAL_CHAIN_SOURCES, ORIGIN_ONLY_MODE
             from app.metadata import SongMetadataFetcher
             from app.now_playing_discovery import NowPlayingDiscoveryService
+            from app.song_validation import prefilter_pair
             from app.station_lookup import StationLookupService
             from app.stream_resolver import StreamResolver
             from app.utils import (
@@ -156,6 +156,7 @@ class QFBridgeService(xbmc.Monitor):
         self.ORIGIN_ONLY_MODE = ORIGIN_ONLY_MODE
         self.SongMetadataFetcher = SongMetadataFetcher
         self.NowPlayingDiscoveryService = NowPlayingDiscoveryService
+        self.prefilter_pair = prefilter_pair
         self.StationLookupService = StationLookupService
         self.StreamResolver = StreamResolver
         self.get_base_domain = get_base_domain
@@ -246,9 +247,10 @@ class QFBridgeService(xbmc.Monitor):
             return ""
         return f"name:{name_norm}"
 
-    def _get_shared_db_path(self):
+    def _get_qf_db_path(self):
+        addon_id = str(self.addon.getAddonInfo("id") or "").strip() or QF_ADDON_ID
         return _translate_path(
-            f"special://userdata/addon_data/{SHARED_DB_ADDON_ID}/song_data.db"
+            f"special://userdata/addon_data/{addon_id}/song_data.db"
         )
 
     def _ensure_verified_sources_schema(self, conn):
@@ -299,7 +301,7 @@ class QFBridgeService(xbmc.Monitor):
         if not station_key or not source_url or not source_url_norm:
             return False
 
-        db_path = self._get_shared_db_path()
+        db_path = self._get_qf_db_path()
         db_dir = os.path.dirname(db_path)
         if db_dir and not os.path.isdir(db_dir):
             os.makedirs(db_dir, exist_ok=True)
@@ -427,12 +429,36 @@ class QFBridgeService(xbmc.Monitor):
         except Exception as err:
             stream_error = str(err)
 
-        if stream_song and stream_song.artist and stream_song.title:
+        station_name = station.name if station else station_input
+        station_slug = ""
+        if station:
+            station_slug = (station.stationuuid or "").strip()
+            if not station_slug:
+                station_slug = self._normalize_station_name(station.name).replace(" ", "-")
+        station_id_value = (station_id or "").strip()
+        invalid_values = ["Unknown", "Radio Stream", "Internet Radio", "", station_name]
+        station_hint_values = [station_name, station_slug, station_id_value]
+
+        def is_valid_qf_pair(artist, title):
+            a, t, state = self.prefilter_pair(
+                artist,
+                title,
+                source="asm-qf",
+                station_name=station_name,
+                invalid_values=invalid_values,
+                station_hint_values=station_hint_values,
+            )
+            return bool(a and t and state == "ok")
+
+        if stream_song and is_valid_qf_pair(
+            stream_song.artist,
+            stream_song.title,
+        ):
             allowed, approval = classify_source(stream_song.source_url)
             if allowed:
                 verified_source_url = (stream_song.source_url or "").strip() or resolved.resolved_url
                 self._record_verified_source(
-                    station_name=station.name if station else station_input,
+                    station_name=station_name,
                     source_url=verified_source_url,
                     confidence=0.95,
                     station_id=station_id,
@@ -455,7 +481,7 @@ class QFBridgeService(xbmc.Monitor):
                 }
             self.logger.debug(
                 "song_source_blocked",
-                station=station.name if station else station_input,
+                station=station_name,
                 source_url=stream_song.source_url,
                 source_kind=stream_song.source_kind,
             )
@@ -475,13 +501,16 @@ class QFBridgeService(xbmc.Monitor):
             stream_headers=stream_headers,
         )
         probe_candidates = discovery.filter_official_html_candidates(feed_candidates, station) or feed_candidates
-        feed_song = discovery.fetch_now_playing(probe_candidates)
-        if feed_song and feed_song.artist and feed_song.title:
+        feed_song = discovery.fetch_now_playing(probe_candidates, station_name=station_name)
+        if feed_song and is_valid_qf_pair(
+            feed_song.artist,
+            feed_song.title,
+        ):
             allowed, approval = classify_source(feed_song.source_url)
             if allowed:
                 verified_source_url = (feed_song.source_url or "").strip() or resolved.resolved_url
                 self._record_verified_source(
-                    station_name=station.name if station else station_input,
+                    station_name=station_name,
                     source_url=verified_source_url,
                     confidence=0.95,
                     station_id=station_id,
@@ -504,7 +533,7 @@ class QFBridgeService(xbmc.Monitor):
                 }
             self.logger.debug(
                 "song_source_blocked",
-                station=station.name if station else station_input,
+                station=station_name,
                 source_url=feed_song.source_url,
                 source_kind=feed_song.source_kind,
             )
