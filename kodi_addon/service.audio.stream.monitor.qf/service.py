@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -209,6 +210,16 @@ class QFBridgeService(xbmc.Monitor):
 
     def _normalize_url(self, value):
         return str(value or "").strip().lower()
+
+    def _sanitize_station_input(self, value):
+        text = str(value or "")
+        if not text:
+            return ""
+        # Strip common Kodi formatting tags from labels before lookup.
+        text = re.sub(r"\[/?COLOR[^\]]*\]", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[[^\]]+\]", " ", text)
+        text = text.replace("•", " ")
+        return " ".join(text.split()).strip()
 
     def _build_station_key(self, station_name):
         name_norm = self._normalize_station_name(station_name)
@@ -496,12 +507,13 @@ class QFBridgeService(xbmc.Monitor):
     def _handle_request(self, req_id, station, mode, req_ts):
         if not req_id:
             return
+        station_clean = self._sanitize_station_input(station)
 
         if not self._get_setting_bool("provider_finder_enabled", default=False):
             self.logger.info(
                 "request_blocked",
                 req_id=req_id,
-                station=station,
+                station=station_clean,
                 mode=mode,
                 reason="qf_disabled",
             )
@@ -517,7 +529,7 @@ class QFBridgeService(xbmc.Monitor):
             self.logger.error(
                 "request_error",
                 req_id=req_id,
-                station=station,
+                station=station_clean,
                 mode=mode,
                 reason="import_failed",
                 error=self._import_error,
@@ -530,7 +542,7 @@ class QFBridgeService(xbmc.Monitor):
             )
             return
 
-        if not (station or "").strip():
+        if not station_clean:
             self.logger.info(
                 "request_nohit",
                 req_id=req_id,
@@ -546,11 +558,11 @@ class QFBridgeService(xbmc.Monitor):
             return
 
         try:
-            result = self._resolve_song(station.strip())
+            result = self._resolve_song(station_clean)
             self.logger.info(
                 "request_result",
                 req_id=req_id,
-                station=station,
+                station=station_clean,
                 mode=mode,
                 status=result.get("status") or "error",
                 reason=result.get("reason") or "",
@@ -570,7 +582,7 @@ class QFBridgeService(xbmc.Monitor):
             self.logger.error(
                 "request_exception",
                 req_id=req_id,
-                station=station,
+                station=station_clean,
                 mode=mode,
                 status=status,
                 error=message,
@@ -594,7 +606,8 @@ class QFBridgeService(xbmc.Monitor):
                 self.logger.info(
                     "request_received",
                     req_id=req_id,
-                    station=station,
+                    station=self._sanitize_station_input(station),
+                    station_raw=station,
                     mode=mode,
                     request_ts=req_ts,
                 )
