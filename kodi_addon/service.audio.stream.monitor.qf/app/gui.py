@@ -579,6 +579,19 @@ class RadioToolApp:
                                 f"Feed-Treffer verworfen (nicht erlaubt): {feed_song.source_url}"
                             )
 
+                if (
+                    strict_webplayer_mode
+                    and not chosen_song
+                    and stream_song_is_track
+                    and stream_song_is_origin
+                ):
+                    self.logger.log(
+                        "Kein gueltiger HTML-Feed-Treffer; falle auf ICY-Treffer zurueck."
+                    )
+                    chosen_song = stream_song
+                    chosen_song.source_approval = stream_song_approval
+                    reported_stream_deferred = False
+
                 if chosen_song and chosen_song.artist and chosen_song.title:
                     song_key = "|".join(
                         [
