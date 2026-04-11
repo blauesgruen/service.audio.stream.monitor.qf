@@ -389,7 +389,19 @@ class QFBridgeService(xbmc.Monitor):
 
         station = None
         stream_seed = station_input
-        if not self.is_probable_url(station_input):
+        station_id_norm = self._normalize_station_id(station_id)
+
+        if station_id_norm:
+            try:
+                station = lookup.find_by_id(station_id_norm)
+                stream_seed = station.stream_url
+                self.logger.debug("station_id_match_ok", id=station_id_norm, name=station.name)
+            except Exception as err:
+                self.logger.warning("station_id_lookup_failed", id=station_id_norm, error=str(err))
+                if not self.is_probable_url(station_input) and station_input:
+                    station = lookup.find_best_match(station_input, station_id=station_id_norm)
+                    stream_seed = station.stream_url
+        elif not self.is_probable_url(station_input) and station_input:
             station = lookup.find_best_match(station_input)
             stream_seed = station.stream_url
 
@@ -569,7 +581,8 @@ class QFBridgeService(xbmc.Monitor):
             )
             return
 
-        if not (station or "").strip():
+        station_name = (station or "").strip()
+        if not station_name and not (station_id or "").strip():
             self.logger.info(
                 "request_nohit",
                 req_id=req_id,
@@ -586,7 +599,7 @@ class QFBridgeService(xbmc.Monitor):
             return
 
         try:
-            result = self._resolve_song(station.strip(), station_id=station_id)
+            result = self._resolve_song(station_name, station_id=station_id)
             self.logger.info(
                 "request_result",
                 req_id=req_id,

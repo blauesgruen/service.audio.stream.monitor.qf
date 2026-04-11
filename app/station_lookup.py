@@ -53,7 +53,7 @@ class StationLookupService:
     def __init__(self, log) -> None:
         self._log = log
 
-    def find_best_match(self, query: str) -> StationMatch:
+    def find_best_match(self, query: str, station_id: str = "") -> StationMatch:
         query_clean = query.strip()
         if not query_clean:
             raise StationLookupError("Kein Sendername angegeben.")
@@ -88,7 +88,7 @@ class StationLookupService:
                     query_candidates.extend(candidates)
                     break
             if query_candidates and any(
-                self._is_confident_station_match(candidate, query_clean) for candidate in query_candidates
+                self._is_confident_station_match(candidate, query_clean, station_id=station_id) for candidate in query_candidates
             ):
                 break
 
@@ -97,6 +97,7 @@ class StationLookupService:
                 query_clean,
                 search_queries,
                 errors,
+                station_id=station_id,
             )
             successful_requests += search_successful_requests
             if search_candidates:
@@ -125,12 +126,13 @@ class StationLookupService:
         ranked = sorted(deduped, key=lambda station: self._score_station(station, query_clean), reverse=True)
         best = ranked[0]
 
-        if not self._is_confident_station_match(best, query_clean):
+        if not self._is_confident_station_match(best, query_clean, station_id=station_id):
             if not used_search_fallback:
                 search_candidates, search_successful_requests = self._collect_search_candidates(
                     query_clean,
                     search_queries,
                     errors,
+                    station_id=station_id,
                 )
                 successful_requests += search_successful_requests
                 if search_candidates:
@@ -138,7 +140,7 @@ class StationLookupService:
                     deduped = self._dedupe_candidates([*deduped, *search_candidates])
                     ranked = sorted(deduped, key=lambda station: self._score_station(station, query_clean), reverse=True)
                     best = ranked[0]
-                    if self._is_confident_station_match(best, query_clean):
+                    if self._is_confident_station_match(best, query_clean, station_id=station_id):
                         self._log(
                             "Sender-Match (Search-Refine): "
                             f"{best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
@@ -146,7 +148,7 @@ class StationLookupService:
                         return best
 
             if used_search_fallback:
-                if self._has_stream_channel_conflict(best, query_clean):
+                if not station_id and self._has_stream_channel_conflict(best, query_clean):
                     self._log(
                         "Search-Fallback Treffer verworfen (Kanal-Konflikt zwischen Name und Stream): "
                         f"{best.name}"
@@ -157,7 +159,7 @@ class StationLookupService:
                         f"{best.name}"
                     )
             else:
-                if self._has_stream_channel_conflict(best, query_clean):
+                if not station_id and self._has_stream_channel_conflict(best, query_clean):
                     self._log(
                         "Sender-Match verworfen (Kanal-Konflikt zwischen Name und Stream): "
                         f"{best.name}"
@@ -167,7 +169,7 @@ class StationLookupService:
                         "Sender-Match verworfen (zu geringe Token-Deckung): "
                         f"{best.name}"
                     )
-            channel_fallback_station = self._fallback_channel_station_from_anchor(query_clean, best)
+            channel_fallback_station = self._fallback_channel_station_from_anchor(query_clean, best, station_id=station_id)
             if channel_fallback_station:
                 self._apply_query_alias_name(channel_fallback_station, query_clean)
                 self._log(
@@ -178,7 +180,7 @@ class StationLookupService:
                 )
                 return channel_fallback_station
             homepage_stream_fallback = self._fallback_stream_from_homepage(query_clean, best)
-            if homepage_stream_fallback and self._is_confident_station_match(homepage_stream_fallback, query_clean):
+            if homepage_stream_fallback and self._is_confident_station_match(homepage_stream_fallback, query_clean, station_id=station_id):
                 self._apply_query_alias_name(homepage_stream_fallback, query_clean)
                 self._log(
                     "Sender-Match (Homepage-Stream-Fallback): "
@@ -188,7 +190,7 @@ class StationLookupService:
                 )
                 return homepage_stream_fallback
             fallback_station = self._fallback_web_directory_station(query_clean)
-            if fallback_station and self._is_confident_station_match(fallback_station, query_clean):
+            if fallback_station and self._is_confident_station_match(fallback_station, query_clean, station_id=station_id):
                 self._apply_query_alias_name(fallback_station, query_clean)
                 self._log(
                     "Sender-Match (Web-Fallback): "
@@ -204,6 +206,57 @@ class StationLookupService:
             f"Sender-Match: {best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
         )
         return best
+
+    def find_by_id(self, stationuuid: str) -> StationMatch:
+        uuid_clean = str(stationuuid or "").strip()
+        if not uuid_clean:
+            raise StationLookupError("Keine Station-UUID angegeben.")
+
+        errors = []
+        for base_url in RADIO_BROWSER_BASE_URLS:
+            endpoint = f"{base_url}/json/stations/byuuid/{quote(uuid_clean)}"
+            self._log(f"Sender-Direkt-Abfrage gegen: {base_url} (uuid='{uuid_clean}')")
+            try:
+                request = Request(endpoint, headers={"User-Agent": USER_AGENT})
+                with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                    payload = json.load(response)
+            except Exception as err:
+                errors.append(f"{base_url} [uuid:{uuid_clean}]: {err}")
+                continue
+
+            candidates = self._extract_candidates(payload)
+            if candidates:
+                best = candidates[0]
+                self._log(
+                    "Sender-Match (ID): "
+                    f"{best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
+                )
+                return best
+
+        # Fallback: Namens-Suche mit der ID (viele Addons nutzen Slugs als IDs)
+        for base_url in RADIO_BROWSER_BASE_URLS:
+            endpoint = f"{base_url}/json/stations/byname/{quote(uuid_clean)}?limit=1"
+            self._log(f"Sender-ID-Suche (Slug) gegen: {base_url} (id='{uuid_clean}')")
+            try:
+                request = Request(endpoint, headers={"User-Agent": USER_AGENT})
+                with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                    payload = json.load(response)
+            except Exception as err:
+                errors.append(f"{base_url} [id-slug:{uuid_clean}]: {err}")
+                continue
+
+            candidates = self._extract_candidates(payload)
+            if candidates:
+                best = candidates[0]
+                self._log(
+                    "Sender-Match (ID-Slug): "
+                    f"{best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
+                )
+                return best
+
+        if errors:
+            raise StationLookupError("Sender-Abfrage fehlgeschlagen: " + " | ".join(errors))
+        raise StationLookupError(f"Keinen passenden Sender gefunden für ID '{uuid_clean}'.")
 
     def _apply_query_alias_name(self, station: StationMatch, query: str) -> None:
         query_tokens = self._build_signature_tokens(query)
@@ -238,6 +291,7 @@ class StationLookupService:
         query: str,
         search_queries: list[str],
         errors: list[str],
+        station_id: str = "",
     ) -> tuple[list[StationMatch], int]:
         collected: list[StationMatch] = []
         successful_requests = 0
@@ -267,7 +321,7 @@ class StationLookupService:
                     break
 
             if query_candidates and any(
-                self._is_confident_station_match(candidate, query) for candidate in query_candidates
+                self._is_confident_station_match(candidate, query, station_id=station_id) for candidate in query_candidates
             ):
                 break
 
@@ -354,7 +408,7 @@ class StationLookupService:
             + name_token_score
         )
 
-    def _fallback_channel_station_from_anchor(self, query: str, anchor_station: StationMatch) -> StationMatch | None:
+    def _fallback_channel_station_from_anchor(self, query: str, anchor_station: StationMatch, station_id: str = "") -> StationMatch | None:
         homepage = (anchor_station.homepage or "").strip()
         if not is_probable_url(homepage):
             return None
@@ -385,7 +439,7 @@ class StationLookupService:
         best_score = self._score_station(best, query)
         if best_score < STATION_LOOKUP_CHANNEL_FALLBACK_MIN_SCORE:
             return None
-        if not self._is_confident_station_match(best, query):
+        if not self._is_confident_station_match(best, query, station_id=station_id):
             return None
         return best
 
@@ -848,10 +902,10 @@ class StationLookupService:
             return False
         return True
 
-    def _is_confident_station_match(self, station: StationMatch, query: str) -> bool:
+    def _is_confident_station_match(self, station: StationMatch, query: str, station_id: str = "") -> bool:
         if not self._is_confident_search_match(station, query):
             return False
-        if self._has_stream_channel_conflict(station, query):
+        if not station_id and self._has_stream_channel_conflict(station, query):
             return False
 
         query_tokens_with_pos = self._build_query_tokens_for_strict_match(query)
