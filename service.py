@@ -8,6 +8,7 @@ import time
 import xbmc
 import xbmcaddon
 import xbmcgui
+import xbmcvfs
 
 
 WINDOW = xbmcgui.Window(10000)
@@ -33,6 +34,19 @@ QF_VERIFIED_SOURCE_KIND = "qf_verified"
 
 def _log(message, level=xbmc.LOGINFO):
     xbmc.log(f"[ASM-QF] {message}", level)
+
+
+def _translate_path(path_value):
+    value = str(path_value or "")
+    if not value:
+        return ""
+    try:
+        return xbmcvfs.translatePath(value)
+    except Exception:
+        try:
+            return xbmc.translatePath(value)
+        except Exception:
+            return value
 
 
 class QFLogger:
@@ -92,7 +106,7 @@ class QFBridgeService(xbmc.Monitor):
             return bool(default)
 
     def _get_project_root(self):
-        root = xbmc.translatePath(self.addon.getAddonInfo("path") or "").strip()
+        root = _translate_path(self.addon.getAddonInfo("path") or "").strip()
         return root
 
     def _ensure_imports(self):
@@ -228,7 +242,7 @@ class QFBridgeService(xbmc.Monitor):
         return f"name:{name_norm}"
 
     def _get_shared_db_path(self):
-        return xbmc.translatePath(
+        return _translate_path(
             f"special://userdata/addon_data/{SHARED_DB_ADDON_ID}/song_data.db"
         )
 
