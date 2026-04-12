@@ -1,1 +1,0 @@
-"""Radio source finder package."""

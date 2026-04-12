@@ -31,6 +31,10 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 python3 main.py
 ```
 
+## Single Source Of Truth
+- Kodi und GUI nutzen denselben Top-Level-Code aus diesem Addon-Verzeichnis (`app/`, `service.py`).
+- Es gibt keine zweite Codekopie innerhalb des Repos.
+
 ## Ausfuehrliche Dokumentation
 - [Dokumentationsindex](./dokumente/README.md)
 - [Produktuebersicht](./dokumente/01_Produktuebersicht.md)
