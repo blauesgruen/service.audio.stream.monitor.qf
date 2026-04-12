@@ -8,7 +8,7 @@ import re
 import ssl
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.error import URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -292,6 +292,10 @@ class NowPlayingDiscoveryService:
             seeds.append(f"https://www.{base}/streams.json")
             seeds.append(f"https://{base}/streams.json")
 
+        if self._is_br_context(base_domains, station, resolved):
+            for br_slug in self._build_br_station_slugs(station, resolved):
+                seeds.append(self._build_br_radio_graphql_url(br_slug))
+
         deduped = []
         seen = set()
         for seed in seeds:
@@ -303,6 +307,91 @@ class NowPlayingDiscoveryService:
             deduped.append(seed)
 
         return deduped
+
+    def _is_br_context(
+        self,
+        base_domains: set[str],
+        station: StationMatch | None,
+        resolved: ResolvedStream,
+    ) -> bool:
+        if "br.de" in base_domains or "brradio.br.de" in base_domains:
+            return True
+        station_name = ((station.name if station else "") or resolved.station_name or "").strip().lower()
+        return station_name.startswith("bayern") or station_name.startswith("b5 ")
+
+    def _build_br_station_slugs(
+        self,
+        station: StationMatch | None,
+        resolved: ResolvedStream,
+    ) -> list[str]:
+        def compact(value: str) -> str:
+            text = (value or "").strip().lower()
+            if not text:
+                return ""
+            for src, dst in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+                text = text.replace(src, dst)
+            return re.sub(r"[^a-z0-9]+", "", text)
+
+        candidates = []
+        if station:
+            candidates.append(str(station.raw_record.get("slug") or ""))
+            candidates.append(station.name or "")
+        candidates.append(resolved.station_name or "")
+
+        slugs: list[str] = []
+        seen = set()
+        for candidate in candidates:
+            slug = compact(candidate)
+            if not slug or slug in seen:
+                continue
+            if not (slug.startswith("bayern") or slug.startswith("b5") or slug.startswith("br")):
+                continue
+            seen.add(slug)
+            slugs.append(slug)
+        return slugs[:4]
+
+    def _build_br_radio_graphql_url(self, station_slug: str) -> str:
+        query = (
+            "query broadcastService($stationSlug:String!){"
+            "audioBroadcastService(slug:$stationSlug){"
+            "...on AudioBroadcastService{"
+            "id dvbServiceId name slug fallbackTeaserImage{url} "
+            "trackingInfos{pageVars mediaVars} "
+            "...on MangoBroadcastService{webcamUrls ...jumpMarkers} "
+            "epg(slots:[CURRENT]){"
+            "broadcastEvent{"
+            "trackingInfos{pageVars mediaVars} "
+            "...eventStartEnd "
+            "items{...audioElement ...on NewsElement{author} ...on MusicElement{performer composer}} "
+            "excludedTimeRanges{start end} "
+            "publicationOf{...eventMetadata defaultTeaserImage{url} ...on MangoProgramme{canonicalUrl title kicker}}"
+            "}"
+            "} "
+            "description url sophoraLivestreamDocuments{...regioStreamData}"
+            "}"
+            "}"
+            "} "
+            "fragment regioStreamData on SophoraDocumentSummary{"
+            "sophoraId streamingUrl title reliveUrl trackingInfos{mediaVars}"
+            "} "
+            "fragment eventMetadata on MangoCreativeWorkInterface{"
+            "id kicker title description"
+            "} "
+            "fragment jumpMarkers on MangoBroadcastService{"
+            "lastNewsDate lastTrafficDate lastWeatherDate"
+            "} "
+            "fragment audioElement on AudioElement{"
+            "guid title class start duration"
+            "} "
+            "fragment eventStartEnd on MangoBroadcastEvent{"
+            "id start end"
+            "}"
+        )
+        params = {
+            "query": query,
+            "variables[stationSlug]": station_slug,
+        }
+        return "https://brradio.br.de/radio/v4?" + urlencode(params, doseq=True)
 
     def _extract_radio_directory_slug(self, homepage: str) -> str:
         parsed = urlparse((homepage or "").strip())
@@ -436,6 +525,9 @@ class NowPlayingDiscoveryService:
             return True
         if host.startswith("iris-") and host.endswith(".loverad.io") and path.endswith("/flow.json"):
             return True
+        if host == "brradio.br.de" and path == "/radio/v4":
+            if "stationslug" in query and ("audiobroadcastservice" in query or "broadcastservice" in query):
+                return True
 
         if any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".mp4", ".m3u8")):
             return False
@@ -581,6 +673,8 @@ class NowPlayingDiscoveryService:
         path = parsed.path.lower()
         query = parsed.query.lower()
         score = 0
+        if host == "brradio.br.de" and path == "/radio/v4":
+            score += 140
         if host.startswith("iris-") and host.endswith(".loverad.io") and path.endswith("/flow.json"):
             score += 90
         if path.endswith(".xml"):
@@ -730,35 +824,39 @@ class NowPlayingDiscoveryService:
             return None
 
         candidates = self._extract_iris_flow_candidates(data)
-        for node in self._walk_json_objects(data):
-            title = self._extract_json_value(node, TITLE_KEYS)
-            artist = self._extract_json_value(node, ARTIST_KEYS)
-            if title and not artist:
-                split_artist, split_title = self._split_compound_title(title)
-                if split_artist and split_title:
-                    artist = split_artist
-                    title = split_title
-            time_text = self._extract_json_value(node, TIME_KEYS)
-            duration_text = self._extract_json_value(node, DURATION_KEYS)
-            if not title and not artist:
-                continue
+        br_candidates = self._extract_br_radio_candidates(data)
+        if br_candidates:
+            candidates.extend(br_candidates)
+        else:
+            for node in self._walk_json_objects(data):
+                title = self._extract_json_value(node, TITLE_KEYS)
+                artist = self._extract_artist_from_node(node)
+                if title and not artist:
+                    split_artist, split_title = self._split_compound_title(title)
+                    if split_artist and split_title:
+                        artist = split_artist
+                        title = split_title
+                time_text = self._extract_json_value(node, TIME_KEYS)
+                duration_text = self._extract_json_value(node, DURATION_KEYS)
+                if not title and not artist:
+                    continue
 
-            score = 0
-            if title:
-                score += 10
-            if artist:
-                score += 8
-            score += self._json_status_score(node)
-            age_minutes = self._age_minutes(time_text)
-            if age_minutes is not None:
-                if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
+                score = 0
+                if title:
+                    score += 10
+                if artist:
+                    score += 8
+                score += self._json_status_score(node)
+                age_minutes = self._age_minutes(time_text)
+                if age_minutes is not None:
+                    if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
+                        score -= 120
+                    else:
+                        score += 20
+                if self._is_duration_window_expired(time_text, duration_text):
                     score -= 120
-                else:
-                    score += 20
-            if self._is_duration_window_expired(time_text, duration_text):
-                score -= 120
 
-            candidates.append((score, artist, title, time_text, duration_text, age_minutes))
+                candidates.append((score, artist, title, time_text, duration_text, age_minutes))
 
         if not candidates:
             return None
@@ -827,9 +925,9 @@ class NowPlayingDiscoveryService:
                 if not title:
                     continue
 
-                artist = ""
+                artist = self._extract_artist_from_node(song_node)
                 artist_root = song_node.get("artist")
-                if isinstance(artist_root, dict):
+                if not artist and isinstance(artist_root, dict):
                     artist_entries = artist_root.get("entry")
                     if isinstance(artist_entries, dict):
                         artist_entries = [artist_entries]
@@ -837,7 +935,7 @@ class NowPlayingDiscoveryService:
                         for artist_node in artist_entries:
                             if not isinstance(artist_node, dict):
                                 continue
-                            artist = self._extract_json_value(artist_node, ARTIST_KEYS | {"name", "realname"})
+                            artist = self._extract_artist_from_node(artist_node)
                             if artist:
                                 break
 
@@ -857,6 +955,126 @@ class NowPlayingDiscoveryService:
                 candidates.append((score, artist, title, time_text, duration_text, age_minutes))
 
         return candidates
+
+    def _extract_br_radio_candidates(
+        self,
+        data: dict | list,
+    ) -> list[tuple[int, str, str, str, str, int | None]]:
+        if not isinstance(data, dict):
+            return []
+        root = data.get("data")
+        if not isinstance(root, dict):
+            return []
+        service = root.get("audioBroadcastService")
+        if not isinstance(service, dict):
+            return []
+        epg = service.get("epg")
+        if isinstance(epg, dict):
+            epg = [epg]
+        if not isinstance(epg, list):
+            return []
+
+        candidates: list[tuple[int, str, str, str, str, int | None]] = []
+        for slot in epg:
+            if not isinstance(slot, dict):
+                continue
+            broadcast_event = slot.get("broadcastEvent")
+            if not isinstance(broadcast_event, dict):
+                continue
+
+            event_start = self._extract_json_value(broadcast_event, {"start"})
+            event_end = self._extract_json_value(broadcast_event, {"end"})
+            event_is_active = self._is_time_range_active(event_start, event_end)
+
+            items = broadcast_event.get("items")
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_class = self._extract_json_value(item, {"class"}).strip().lower()
+                if item_class != "music":
+                    continue
+
+                title = self._extract_json_value(item, {"title", "song", "track"})
+                artist = self._extract_br_item_artist(item)
+                if not title or not artist:
+                    continue
+
+                time_text = self._extract_json_value(item, TIME_KEYS)
+                duration_text = self._extract_json_value(item, DURATION_KEYS)
+                age_minutes = self._age_minutes(time_text)
+
+                score = 140
+                if event_is_active:
+                    score += 30
+                if self._is_duration_window_active(time_text, duration_text):
+                    score += 260
+                elif self._is_duration_window_expired(time_text, duration_text):
+                    score -= 220
+                else:
+                    score -= 40
+
+                if age_minutes is not None:
+                    if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
+                        score -= 180
+                    elif age_minutes >= 0:
+                        score += 20
+                    else:
+                        score -= 40
+
+                candidates.append((score, artist, title, time_text, duration_text, age_minutes))
+
+        return candidates
+
+    def _extract_artist_from_node(self, node: dict) -> str:
+        if not isinstance(node, dict):
+            return ""
+
+        direct = self._extract_json_value(node, ARTIST_KEYS | {"name", "realname"})
+        if direct:
+            return direct
+
+        for key in ("performer", "artist", "author", "interpret", "band", "artists"):
+            nested = self._extract_nested_name(node.get(key))
+            if nested:
+                return nested
+        return ""
+
+    def _extract_br_item_artist(self, item: dict) -> str:
+        if not isinstance(item, dict):
+            return ""
+        return self._extract_artist_from_node(item)
+
+    def _extract_nested_name(self, value) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, dict):
+            direct = self._extract_json_value(
+                value,
+                ARTIST_KEYS | {"name", "realname", "label", "text", "title", "value"},
+            )
+            if direct:
+                return direct
+            for list_key in ("entry", "entries", "items", "values", "list", "data"):
+                nested = value.get(list_key)
+                if isinstance(nested, dict):
+                    nested = [nested]
+                if isinstance(nested, list):
+                    for child in nested:
+                        found = self._extract_nested_name(child)
+                        if found:
+                            return found
+            return ""
+        if isinstance(value, list):
+            for child in value:
+                found = self._extract_nested_name(child)
+                if found:
+                    return found
+        return ""
 
     def _parse_html_payload(self, payload: str, source_url: str) -> SongInfo | None:
         if not payload:
@@ -1175,6 +1393,9 @@ class NowPlayingDiscoveryService:
         station: StationMatch | None,
     ) -> bool:
         lower_url = (url or "").lower()
+        parsed = urlparse(lower_url)
+        if parsed.netloc == "brradio.br.de" and parsed.path == "/radio/v4":
+            return True
         is_radiomodul = "radiomodul" in lower_url
         is_playlist_like = any(
             token in lower_url
@@ -1912,6 +2133,25 @@ class NowPlayingDiscoveryService:
             if (len(token) >= 3 or is_mixed_alnum_token(token)) and token not in stopwords and not token.isdigit()
         }
 
+    def _is_time_range_active(self, start_value: str, end_value: str) -> bool:
+        start_at = self._parse_datetime(start_value)
+        end_at = self._parse_datetime(end_value)
+        if not start_at or not end_at:
+            return False
+
+        if start_at.tzinfo is None:
+            start_at = start_at.replace(tzinfo=timezone.utc)
+        else:
+            start_at = start_at.astimezone(timezone.utc)
+
+        if end_at.tzinfo is None:
+            end_at = end_at.replace(tzinfo=timezone.utc)
+        else:
+            end_at = end_at.astimezone(timezone.utc)
+
+        now_utc = datetime.now(timezone.utc)
+        return start_at <= now_utc <= end_at
+
     def _duration_seconds(self, value: str) -> int | None:
         text = (value or "").strip()
         if not text:
@@ -1931,6 +2171,26 @@ class NowPlayingDiscoveryService:
         except ValueError:
             return None
         return None
+
+    def _is_duration_window_active(self, start_value: str, duration_value: str) -> bool:
+        start_at = self._parse_datetime(start_value)
+        duration_seconds = self._duration_seconds(duration_value)
+        if not start_at or duration_seconds is None:
+            return False
+        if duration_seconds <= 0 or duration_seconds > 4 * 3600:
+            return False
+
+        if start_at.tzinfo is None:
+            start_utc = start_at.replace(tzinfo=timezone.utc)
+        else:
+            start_utc = start_at.astimezone(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+
+        if now_utc < (start_utc - timedelta(seconds=120)):
+            return False
+
+        end_utc = start_utc + timedelta(seconds=duration_seconds + NOWPLAYING_DURATION_GRACE_SECONDS)
+        return start_utc <= now_utc <= end_utc
 
     def _is_duration_window_expired(self, start_value: str, duration_value: str) -> bool:
         start_at = self._parse_datetime(start_value)

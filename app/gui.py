@@ -390,36 +390,73 @@ class RadioToolApp:
             stations.append(line)
         return stations
 
+    def _is_http_429_error(self, err: Exception) -> bool:
+        if isinstance(err, HTTPError) and int(getattr(err, "code", 0) or 0) == 429:
+            return True
+        text = str(err or "")
+        return "HTTP Error 429" in text or "Too Many Requests" in text
+
+    def _run_with_429_retry(self, action, *, label: str, max_attempts: int = 3, base_delay: float = 1.5):
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return action()
+            except Exception as err:
+                if (
+                    not self._is_http_429_error(err)
+                    or attempt >= max_attempts
+                    or self._stop_event.is_set()
+                ):
+                    raise
+                delay = base_delay * (2 ** (attempt - 1))
+                self.logger.log(
+                    f"{label}: HTTP 429 (Versuch {attempt}/{max_attempts}), "
+                    f"warte {delay:.1f}s und retry."
+                )
+                end_at = time.time() + delay
+                while time.time() < end_at:
+                    if self._stop_event.is_set():
+                        raise
+                    time.sleep(min(0.2, max(0.0, end_at - time.time())))
+
     def _batch_worker(self, stations: list[str], source_path: str) -> None:
         resolver = StreamResolver(self.logger.log)
         fetcher = SongMetadataFetcher(self.logger.log)
         lookup = StationLookupService(self.logger.log)
         now_playing_discovery = NowPlayingDiscoveryService(self.logger.log)
 
-        rows: list[tuple[str, str, str]] = []
+        rows: list[list[str]] = []
+        retry_429_row_indices: list[int] = []
         total = len(stations)
+        retry_429_cooldown_seconds = 60.0
 
         try:
-            for idx, query in enumerate(stations, start=1):
-                if self._stop_event.is_set():
-                    break
-
-                self._results.put(("batch_progress", f"Batchtest {idx}/{total}: {query}"))
-                self.logger.log(f"[Batch {idx}/{total}] Starte Analyse für: {query}")
-
+            def process_query(query: str, label: str) -> tuple[str, str, str, bool]:
                 result_kind = "leer"
                 result_value = "no_hit"
+                found_station_name = ""
                 station: StationMatch | None = None
+                rate_limited = False
 
                 try:
                     stream_seed = query
                     if not is_probable_url(query):
-                        station = lookup.find_best_match(query)
+                        station = self._run_with_429_retry(
+                            lambda: lookup.find_best_match(query),
+                            label=f"{label} Lookup {query}",
+                        )
+                        found_station_name = station.name or ""
                         stream_seed = station.stream_url
 
-                    resolved = resolver.resolve(stream_seed, original_input=query)
+                    resolved = self._run_with_429_retry(
+                        lambda: resolver.resolve(stream_seed, original_input=query),
+                        label=f"{label} Resolve {query}",
+                    )
                     if station:
                         resolved.station_name = station.name
+                    if not found_station_name:
+                        found_station_name = (resolved.station_name or "").strip()
                     station_name = station.name if station else query
                     station_slug = (station.stationuuid or "").strip() if station else ""
                     station_hints = [station_name, station_slug, ""]
@@ -476,21 +513,75 @@ class RadioToolApp:
                 except Exception as err:
                     result_kind = "leer"
                     result_value = f"resolve_error:{err}"
+                    rate_limited = self._is_http_429_error(err)
 
-                rows.append((query, result_kind, result_value))
+                return result_kind, result_value, found_station_name, rate_limited
+
+            for idx, query in enumerate(stations, start=1):
+                if self._stop_event.is_set():
+                    break
+
+                self._results.put(("batch_progress", f"Batchtest {idx}/{total}: {query}"))
+                self.logger.log(f"[Batch {idx}/{total}] Starte Analyse für: {query}")
+                result_kind, result_value, found_station_name, rate_limited = process_query(
+                    query,
+                    f"[Batch {idx}/{total}]",
+                )
+
+                rows.append([query, result_kind, result_value, found_station_name])
+                if rate_limited:
+                    retry_429_row_indices.append(len(rows) - 1)
                 self.logger.log(f"[Batch {idx}/{total}] {query} -> {result_kind}: {result_value}")
+
+            if retry_429_row_indices and not self._stop_event.is_set():
+                retry_total = len(retry_429_row_indices)
+                self.logger.log(
+                    f"[Batch Retry] {retry_total} Rate-Limit-Fälle erkannt; "
+                    f"zweiter Pass nach {retry_429_cooldown_seconds:.0f}s Cooldown."
+                )
+                self._results.put(
+                    (
+                        "batch_progress",
+                        f"Rate-Limit erkannt: zweiter Pass in {int(retry_429_cooldown_seconds)}s "
+                        f"({retry_total} Sender)",
+                    )
+                )
+
+                end_at = time.time() + retry_429_cooldown_seconds
+                while time.time() < end_at:
+                    if self._stop_event.is_set():
+                        break
+                    time.sleep(min(0.2, max(0.0, end_at - time.time())))
+
+                for retry_idx, row_index in enumerate(retry_429_row_indices, start=1):
+                    if self._stop_event.is_set():
+                        break
+                    query = rows[row_index][0]
+                    self._results.put(("batch_progress", f"Batch Retry {retry_idx}/{retry_total}: {query}"))
+                    self.logger.log(f"[Batch Retry {retry_idx}/{retry_total}] Starte Analyse für: {query}")
+                    result_kind, result_value, found_station_name, _ = process_query(
+                        query,
+                        f"[Batch Retry {retry_idx}/{retry_total}]",
+                    )
+                    rows[row_index][1] = result_kind
+                    rows[row_index][2] = result_value
+                    rows[row_index][3] = found_station_name
+                    self.logger.log(
+                        f"[Batch Retry {retry_idx}/{retry_total}] {query} -> {result_kind}: {result_value}"
+                    )
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             batch_dir = Path(__file__).resolve().parent.parent / "dokumente" / "senderlisten_und_batchtests"
             batch_dir.mkdir(parents=True, exist_ok=True)
             out_path = batch_dir / f"batchtest_result_{timestamp}.tsv"
             with out_path.open("w", encoding="utf-8") as handle:
-                handle.write("sender\tergebnis\twert\n")
-                for sender, result_kind, result_value in rows:
+                handle.write("sender\tergebnis\twert\tgefunden_sendername\n")
+                for sender, result_kind, result_value, found_station_name in rows:
                     safe_sender = sender.replace("\t", " ").strip()
                     safe_kind = result_kind.replace("\t", " ").strip()
                     safe_value = result_value.replace("\t", " ").strip()
-                    handle.write(f"{safe_sender}\t{safe_kind}\t{safe_value}\n")
+                    safe_found_station = found_station_name.replace("\t", " ").strip()
+                    handle.write(f"{safe_sender}\t{safe_kind}\t{safe_value}\t{safe_found_station}\n")
 
             songs = sum(1 for _, kind, _ in rows if kind == "song")
             empty = sum(1 for _, kind, _ in rows if kind != "song")

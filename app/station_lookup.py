@@ -53,6 +53,20 @@ class StationLookupService:
     def __init__(self, log) -> None:
         self._log = log
 
+    def _fold_german_umlauts(self, value: str) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        return (
+            text.replace("ä", "ae")
+            .replace("ö", "oe")
+            .replace("ü", "ue")
+            .replace("ß", "ss")
+            .replace("Ä", "Ae")
+            .replace("Ö", "Oe")
+            .replace("Ü", "Ue")
+        )
+
     def find_best_match(self, query: str, station_id: str = "") -> StationMatch:
         query_clean = query.strip()
         if not query_clean:
@@ -125,6 +139,22 @@ class StationLookupService:
         deduped = self._dedupe_candidates(collected)
         ranked = sorted(deduped, key=lambda station: self._score_station(station, query_clean), reverse=True)
         best = ranked[0]
+
+        if not station_id and self._is_single_token_lookup_query(query_clean):
+            direct_fallback_station = self._fallback_web_directory_station(query_clean)
+            if (
+                direct_fallback_station
+                and self._is_confident_station_match(direct_fallback_station, query_clean, station_id=station_id)
+                and not self._has_strong_name_equivalence(best.name or "", query_clean)
+            ):
+                self._apply_query_alias_name(direct_fallback_station, query_clean)
+                self._log(
+                    "Sender-Match (Single-Token-Web-Priority): "
+                    f"{direct_fallback_station.name} | {direct_fallback_station.country or '-'} | "
+                    f"{direct_fallback_station.codec or '-'} {direct_fallback_station.bitrate}kbps | "
+                    f"votes={direct_fallback_station.votes}"
+                )
+                return direct_fallback_station
 
         if not self._is_confident_station_match(best, query_clean, station_id=station_id):
             if not used_search_fallback:
@@ -763,6 +793,11 @@ class StationLookupService:
             return []
 
         token_groups = self._build_token_groups(tokens)
+        folded_normalized = self._fold_german_umlauts(normalized).lower()
+        if folded_normalized and folded_normalized != normalized:
+            folded_tokens = split_search_tokens(folded_normalized)
+            if folded_tokens:
+                token_groups.extend(self._build_token_groups(folded_tokens))
 
         slugs: list[str] = []
         seen = set()
@@ -793,6 +828,11 @@ class StationLookupService:
         seen = set()
         tokens = split_search_tokens(normalized)
         token_groups = self._build_token_groups(tokens)
+        folded_normalized = re.sub(r"\s+", " ", self._fold_german_umlauts(normalized).strip())
+        if folded_normalized and folded_normalized.lower() != normalized.lower():
+            folded_tokens = split_search_tokens(folded_normalized)
+            if folded_tokens:
+                token_groups.extend(self._build_token_groups(folded_tokens))
         original_key = normalized.lower()
         original_tokens = [token.lower() for token in tokens]
 
@@ -836,10 +876,10 @@ class StationLookupService:
                         dotted_key = dotted_variant.lower()
                         if dotted_key in seen:
                             continue
-                            seen.add(dotted_key)
-                            variants.append(dotted_variant)
-                            if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
-                                return variants
+                        seen.add(dotted_key)
+                        variants.append(dotted_variant)
+                        if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
+                            return variants
                     for compound_variant in self._expand_compound_token_variants(compacted):
                         compound_key = compound_variant.lower()
                         if compound_key in seen:
@@ -876,26 +916,41 @@ class StationLookupService:
             if len(queries) >= STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS:
                 return queries
 
+        folded_normalized = self._fold_german_umlauts(normalized).lower()
+        if folded_normalized and folded_normalized != normalized:
+            add(folded_normalized)
+            if len(queries) >= STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS:
+                return queries
+
         tokens = split_search_tokens(normalized)
         if not tokens:
             return queries
 
-        mapped_tokens = [STATION_LOOKUP_NUMBER_TOKEN_MAP.get(token, token) for token in tokens]
-        filtered_tokens = [
-            token
-            for token in mapped_tokens
-            if (
-                token not in STATION_LOOKUP_IGNORED_TOKENS
-                and token not in STATION_LOOKUP_SKIP_PREFIX_TOKENS
-                and (
-                    len(token) >= STATION_LOOKUP_SEARCH_MIN_TOKEN_LENGTH
-                    or (token.isdigit() and len(token) >= 2)
-                    or self._is_significant_short_token(token)
-                )
-            )
-        ]
+        token_sets = [tokens]
+        if folded_normalized and folded_normalized != normalized:
+            folded_tokens = split_search_tokens(folded_normalized)
+            if folded_tokens:
+                token_sets.append(folded_tokens)
 
-        if filtered_tokens:
+        for token_set in token_sets:
+            mapped_tokens = [STATION_LOOKUP_NUMBER_TOKEN_MAP.get(token, token) for token in token_set]
+            filtered_tokens = [
+                token
+                for token in mapped_tokens
+                if (
+                    token not in STATION_LOOKUP_IGNORED_TOKENS
+                    and token not in STATION_LOOKUP_SKIP_PREFIX_TOKENS
+                    and (
+                        len(token) >= STATION_LOOKUP_SEARCH_MIN_TOKEN_LENGTH
+                        or (token.isdigit() and len(token) >= 2)
+                        or self._is_significant_short_token(token)
+                    )
+                )
+            ]
+
+            if not filtered_tokens:
+                continue
+
             add(" ".join(filtered_tokens))
             if len(filtered_tokens) >= 2:
                 add(" ".join(filtered_tokens[-2:]))
@@ -939,11 +994,16 @@ class StationLookupService:
             return False
         source_type = str(station.raw_record.get("source") or "").strip().lower()
         if source_type != "web_directory_fallback" and not station_id and self._has_stream_channel_conflict(station, query):
+            if self._has_strong_name_equivalence(station.name or "", query):
+                query_tokens_with_pos = self._build_query_tokens_for_strict_match(query)
+                if len(query_tokens_with_pos) < STATION_LOOKUP_STRICT_MIN_QUERY_TOKENS:
+                    return self._is_short_query_name_compatible(station.name or "", query)
+                return True
             return False
 
         query_tokens_with_pos = self._build_query_tokens_for_strict_match(query)
         if len(query_tokens_with_pos) < STATION_LOOKUP_STRICT_MIN_QUERY_TOKENS:
-            return True
+            return self._is_short_query_name_compatible(station.name or "", query)
 
         station_tokens = self._build_station_tokens_for_strict_match(station)
         missing = [(token, pos) for token, pos in query_tokens_with_pos if token not in station_tokens]
@@ -966,6 +1026,75 @@ class StationLookupService:
                 and missing_token in STATION_LOOKUP_OPTIONAL_PREFIX_TOKENS
                 and missing_token not in STATION_LOOKUP_SIGNIFICANT_SHORT_TOKENS
             ):
+                return True
+        if self._has_strong_name_equivalence(station.name or "", query):
+            return True
+        return False
+
+    def _compact_compare_key(self, value: str) -> str:
+        text = (value or "").strip().lower()
+        if not text:
+            return ""
+        for src, dst in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+            text = text.replace(src, dst)
+        return re.sub(r"[^a-z0-9]+", "", text)
+
+    def _is_allowed_short_query_affix(self, extra: str) -> bool:
+        raw = (extra or "").strip().lower()
+        if not raw:
+            return True
+        if re.fullmatch(r"\d{2,3}(aac|mp3|opus)?", raw):
+            return True
+        if raw.isdigit():
+            return False
+        stripped = re.sub(r"(mp3|aac|opus|stream|live|radio|fm|am|hq|lq|dlf|ukw)+", "", raw)
+        if not stripped:
+            return False
+        return stripped in {"orf"}
+
+    def _is_short_query_name_compatible(self, station_name: str, query: str) -> bool:
+        query_compact = self._compact_compare_key(query)
+        station_compact = self._compact_compare_key(station_name)
+        if not query_compact or not station_compact:
+            return True
+        if station_compact == query_compact:
+            return True
+
+        if len(query_compact) >= 3 and query_compact in station_compact:
+            idx = station_compact.find(query_compact)
+            extra = station_compact[:idx] + station_compact[idx + len(query_compact) :]
+            return self._is_allowed_short_query_affix(extra)
+        if len(station_compact) >= 3 and station_compact in query_compact:
+            idx = query_compact.find(station_compact)
+            extra = query_compact[:idx] + query_compact[idx + len(station_compact) :]
+            return self._is_allowed_short_query_affix(extra)
+        return False
+
+    def _has_strong_name_equivalence(self, station_name: str, query: str) -> bool:
+        def small_affix(value: str) -> bool:
+            extra = (value or "").strip().lower()
+            if not extra:
+                return True
+            extra = re.sub(r"\d+", "", extra)
+            extra = re.sub(r"(mp3|aac|opus|kbit|kbps|stream|audio|hq|lq|dlf)+", "", extra)
+            return len(extra) <= 8
+
+        station_compact = self._compact_compare_key(station_name)
+        query_compact = self._compact_compare_key(query)
+        if not station_compact or not query_compact:
+            return False
+        if station_compact == query_compact:
+            return True
+
+        # Allow small affix extensions around the exact compact query token,
+        # e.g. "hitradiooe3" vs. "orfhitradiooe3hq".
+        if len(query_compact) >= 6 and query_compact in station_compact:
+            extra = station_compact.replace(query_compact, "", 1)
+            if small_affix(extra):
+                return True
+        if len(station_compact) >= 6 and station_compact in query_compact:
+            extra = query_compact.replace(station_compact, "", 1)
+            if small_affix(extra):
                 return True
         return False
 
@@ -1048,6 +1177,17 @@ class StationLookupService:
             if len(token) >= 3 or self._is_significant_short_token(token):
                 tokens_with_pos.append((token, pos))
         return tokens_with_pos
+
+    def _is_single_token_lookup_query(self, query: str) -> bool:
+        tokens_with_pos = self._build_query_tokens_for_strict_match(query)
+        if len(tokens_with_pos) != 1:
+            return False
+        token = tokens_with_pos[0][0]
+        if token.isdigit():
+            return False
+        if any(char.isdigit() for char in token):
+            return True
+        return len(token) <= 5
 
     def _build_station_tokens_for_strict_match(self, station: StationMatch) -> set[str]:
         text = " ".join(

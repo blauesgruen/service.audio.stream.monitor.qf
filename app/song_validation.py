@@ -17,6 +17,15 @@ NON_SONG_TEXT_KEYWORDS = {
 }
 
 
+def compact_station_compare_text(text: str) -> str:
+    value = str(text or "").strip().lower()
+    if not value:
+        return ""
+    for src, dst in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        value = value.replace(src, dst)
+    return re.sub(r"[^a-z0-9]+", "", value)
+
+
 def normalize_station_compare_text(text: str) -> str:
     value = str(text or "").strip().lower()
     if not value:
@@ -37,11 +46,30 @@ def build_station_hints(raw_values: list[str] | tuple[str, ...]) -> list[str]:
         variants = [val]
         if "-" in val or "_" in val:
             variants.append(val.replace("-", " ").replace("_", " "))
+        tokens = normalize_station_compare_text(val).split()
+        if len(tokens) >= 2:
+            tail = tokens[-1]
+            if tail.isalpha() and len(tail) <= 3:
+                variants.append(" ".join(tokens[:-1]))
+        if len(tokens) >= 2 and tokens[0].isalpha() and tokens[1].isdigit():
+            variants.append(f"{tokens[0]} {tokens[1]}")
+            variants.append(f"{tokens[0]}{tokens[1]}")
+        if tokens:
+            lead = tokens[0]
+            if (
+                lead not in {"radio", "live", "music", "hits", "news"}
+                and (len(lead) >= 5 or any(char.isdigit() for char in lead))
+            ):
+                variants.append(lead)
         for raw in variants:
             norm = normalize_station_compare_text(raw)
             if norm and norm not in seen:
                 seen.add(norm)
                 hints.append(norm)
+            compact = compact_station_compare_text(raw)
+            if compact and compact not in seen:
+                seen.add(compact)
+                hints.append(compact)
     return hints
 
 
@@ -54,13 +82,15 @@ def is_station_name_match_pair(
     if not a or not t:
         return False
     pair_text = normalize_station_compare_text(f"{a} {t}")
+    pair_compact = compact_station_compare_text(f"{a} {t}")
     if not pair_text:
         return False
     for hint in list(station_hints or []):
-        h = str(hint or "").strip().lower()
-        if len(h) < int(min_len):
-            continue
-        if h in pair_text:
+        h_norm = normalize_station_compare_text(hint)
+        if h_norm and len(h_norm) >= int(min_len) and h_norm in pair_text:
+            return True
+        h_compact = compact_station_compare_text(hint)
+        if h_compact and len(h_compact) >= int(min_len) and h_compact in pair_compact:
             return True
     return False
 
@@ -81,12 +111,20 @@ def is_generic_metadata_text(
     station_name: str = "",
     extra_keywords: list[str] | tuple[str, ...] = (),
 ) -> bool:
-    text_l = str(text or "").strip().lower()
-    if not text_l:
+    text_l = normalize_station_compare_text(text)
+    text_compact = compact_station_compare_text(text)
+    if not text_l and not text_compact:
         return False
-    station_l = str(station_name or "").strip().lower()
-    if station_l and station_l in text_l:
-        return True
+
+    station_hints = build_station_hints((station_name,))
+    for hint in station_hints:
+        h_norm = normalize_station_compare_text(hint)
+        if h_norm and h_norm in text_l:
+            return True
+        h_compact = compact_station_compare_text(hint)
+        if h_compact and h_compact in text_compact:
+            return True
+
     return any(str(tok or "").lower() in text_l for tok in list(extra_keywords or []))
 
 
