@@ -238,6 +238,83 @@ class QFBridgeService(xbmc.Monitor):
             text = text[len("stationid:") :].strip()
         return text
 
+    def _sanitize_station_text(self, value):
+        text = str(value or "")
+        if not text:
+            return ""
+        text = re.sub(r"\[/?COLOR[^\]]*\]", " ", text, flags=re.IGNORECASE)
+        text = text.replace("•", " ")
+        text = " ".join(text.strip().split())
+        return text
+
+    def _compact_station_text(self, value):
+        text = self._sanitize_station_text(value).lower()
+        if not text:
+            return ""
+        for src, dst in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+            text = text.replace(src, dst)
+        text = re.sub(r"[^a-z0-9]+", "", text)
+        return text
+
+    def _build_station_lookup_variants(self, value):
+        raw = self._sanitize_station_text(value)
+        if not raw:
+            return []
+
+        variants = []
+        seen = set()
+
+        def add(candidate):
+            clean = " ".join(str(candidate or "").strip().split())
+            if not clean:
+                return
+            key = clean.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            variants.append(clean)
+
+        add(raw)
+        add(re.sub(r"[-_./|]+", " ", raw))
+        compact = self._compact_station_text(raw)
+        if compact and len(compact) >= 3:
+            add(compact)
+
+        return variants
+
+    def _find_station_by_name_with_fallback(self, lookup, station_input, station_id_norm=""):
+        variants = self._build_station_lookup_variants(station_input)
+        if not variants:
+            raise ValueError("Kein gültiger Sendername für Lookup vorhanden.")
+
+        last_error = None
+        for idx, variant in enumerate(variants):
+            try:
+                if station_id_norm:
+                    station = lookup.find_best_match(variant, station_id=station_id_norm)
+                else:
+                    station = lookup.find_best_match(variant)
+                if idx > 0:
+                    self.logger.info(
+                        "station_name_lookup_fallback_ok",
+                        input=station_input,
+                        variant=variant,
+                        station_id=station_id_norm,
+                        name=station.name,
+                    )
+                return station
+            except Exception as err:
+                last_error = err
+                self.logger.debug(
+                    "station_name_lookup_variant_failed",
+                    input=station_input,
+                    variant=variant,
+                    station_id=station_id_norm,
+                    error=str(err),
+                )
+
+        raise last_error if last_error else ValueError("Kein passender Sender gefunden.")
+
     def _build_station_key(self, station_name, station_id=""):
         station_id_norm = self._normalize_station_id(station_id)
         if station_id_norm:
@@ -401,10 +478,14 @@ class QFBridgeService(xbmc.Monitor):
             except Exception as err:
                 self.logger.warning("station_id_lookup_failed", id=station_id_norm, error=str(err))
                 if not self.is_probable_url(station_input) and station_input:
-                    station = lookup.find_best_match(station_input, station_id=station_id_norm)
+                    station = self._find_station_by_name_with_fallback(
+                        lookup,
+                        station_input,
+                        station_id_norm=station_id_norm,
+                    )
                     stream_seed = station.stream_url
         elif not self.is_probable_url(station_input) and station_input:
-            station = lookup.find_best_match(station_input)
+            station = self._find_station_by_name_with_fallback(lookup, station_input)
             stream_seed = station.stream_url
 
         resolved = resolver.resolve(stream_seed, original_input=station_input)

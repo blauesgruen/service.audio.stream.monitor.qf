@@ -7,9 +7,10 @@ import sys
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from urllib.error import HTTPError, URLError
 
 if __package__:
@@ -33,7 +34,7 @@ if __package__:
     from .metadata import MetadataError, SongMetadataFetcher
     from .models import EpgInfo, ResolvedStream, SongInfo, StationMatch
     from .now_playing_discovery import NowPlayingDiscoveryService
-    from .song_validation import is_valid_song_candidate
+    from .song_validation import is_valid_song_candidate, prefilter_pair
     from .station_lookup import StationLookupError, StationLookupService
     from .stream_resolver import StreamResolveError, StreamResolver
     from .utils import get_base_domain, is_non_origin_directory_url, is_origin_url, is_probable_url
@@ -63,7 +64,7 @@ else:
     from app.metadata import MetadataError, SongMetadataFetcher
     from app.models import EpgInfo, ResolvedStream, SongInfo, StationMatch
     from app.now_playing_discovery import NowPlayingDiscoveryService
-    from app.song_validation import is_valid_song_candidate
+    from app.song_validation import is_valid_song_candidate, prefilter_pair
     from app.station_lookup import StationLookupError, StationLookupService
     from app.stream_resolver import StreamResolveError, StreamResolver
     from app.utils import get_base_domain, is_non_origin_directory_url, is_origin_url, is_probable_url
@@ -131,49 +132,52 @@ class RadioToolApp:
         self.stop_button = ttk.Button(frame, text="Stop", command=self.stop_scan, state="disabled")
         self.stop_button.grid(row=2, column=1, sticky="w", padx=(8, 0))
 
-        ttk.Button(frame, text="Live-Log öffnen", command=self.show_log_window).grid(
-            row=2, column=2, sticky="w", padx=(8, 0)
-        )
+        self.batch_button = ttk.Button(frame, text="Batchtest Datei...", command=self.start_batch_scan)
+        self.batch_button.grid(row=2, column=2, sticky="w", padx=(8, 0))
 
-        ttk.Button(frame, text="Quell-Details", command=self.show_details_window).grid(
+        ttk.Button(frame, text="Live-Log öffnen", command=self.show_log_window).grid(
             row=2, column=3, sticky="w", padx=(8, 0)
         )
 
-        self.save_button = ttk.Button(frame, text="Verifiziert speichern", command=self.save_verified, state="disabled")
-        self.save_button.grid(row=2, column=4, sticky="e")
+        ttk.Button(frame, text="Quell-Details", command=self.show_details_window).grid(
+            row=2, column=4, sticky="w", padx=(8, 0)
+        )
 
-        ttk.Separator(frame, orient="horizontal").grid(row=3, column=0, columnspan=5, sticky="ew", pady=10)
+        self.save_button = ttk.Button(frame, text="Verifiziert speichern", command=self.save_verified, state="disabled")
+        self.save_button.grid(row=2, column=5, sticky="e")
+
+        ttk.Separator(frame, orient="horizontal").grid(row=3, column=0, columnspan=6, sticky="ew", pady=10)
 
         ttk.Label(frame, text="Gefundener Sender:").grid(row=4, column=0, sticky="w")
-        ttk.Label(frame, textvariable=self.station_var).grid(row=5, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, textvariable=self.station_var).grid(row=5, column=0, columnspan=6, sticky="w")
 
         ttk.Label(frame, text="Original-Stream:").grid(row=6, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.resolved_var, foreground="#0b5").grid(row=7, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, textvariable=self.resolved_var, foreground="#0b5").grid(row=7, column=0, columnspan=6, sticky="w")
 
         ttk.Label(frame, text="Delivery-URL (Redirect-Ziel):").grid(row=8, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.delivery_var).grid(row=9, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, textvariable=self.delivery_var).grid(row=9, column=0, columnspan=6, sticky="w")
 
         ttk.Label(frame, text="Content-Type:").grid(row=10, column=0, sticky="w", pady=(10, 0))
         ttk.Label(frame, textvariable=self.content_type_var).grid(row=11, column=0, sticky="w")
 
         ttk.Label(frame, text="Aktueller Song:").grid(row=12, column=0, sticky="w", pady=(10, 0))
         ttk.Label(frame, textvariable=self.song_var, font=("TkDefaultFont", 11, "bold")).grid(
-            row=13, column=0, columnspan=5, sticky="w"
+            row=13, column=0, columnspan=6, sticky="w"
         )
 
         ttk.Label(frame, text="Song-Quelle URL:").grid(row=14, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.song_source_var).grid(row=15, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, textvariable=self.song_source_var).grid(row=15, column=0, columnspan=6, sticky="w")
 
         ttk.Label(frame, text="Song-Status:").grid(row=16, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.song_state_var).grid(row=17, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, textvariable=self.song_state_var).grid(row=17, column=0, columnspan=6, sticky="w")
 
         ttk.Label(frame, text="EPG-Status:").grid(row=18, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.epg_var).grid(row=19, column=0, columnspan=5, sticky="w")
+        ttk.Label(frame, textvariable=self.epg_var).grid(row=19, column=0, columnspan=6, sticky="w")
 
-        ttk.Label(frame, textvariable=self.origin_mode_var).grid(row=20, column=0, columnspan=5, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.origin_mode_var).grid(row=20, column=0, columnspan=6, sticky="w", pady=(10, 0))
 
-        ttk.Separator(frame, orient="horizontal").grid(row=21, column=0, columnspan=5, sticky="ew", pady=10)
-        ttk.Label(frame, textvariable=self.status_var).grid(row=22, column=0, columnspan=5, sticky="w")
+        ttk.Separator(frame, orient="horizontal").grid(row=21, column=0, columnspan=6, sticky="ew", pady=10)
+        ttk.Label(frame, textvariable=self.status_var).grid(row=22, column=0, columnspan=6, sticky="w")
 
         frame.columnconfigure(0, weight=1)
 
@@ -277,9 +281,19 @@ class RadioToolApp:
                 self._render_source_details()
             elif event == "error":
                 self.status_var.set(str(payload))
+            elif event == "batch_progress":
+                self.status_var.set(str(payload))
+            elif event == "batch_done":
+                result_path = str(payload.get("result_path") or "").strip()
+                summary = str(payload.get("summary") or "").strip()
+                if summary:
+                    self.status_var.set(summary)
+                if result_path:
+                    messagebox.showinfo("Batchtest fertig", f"Ergebnisdatei:\n{result_path}")
             elif event == "done":
                 self.start_button.configure(state="normal")
                 self.stop_button.configure(state="disabled")
+                self.batch_button.configure(state="normal")
 
     def start_scan(self) -> None:
         value = self.url_var.get().strip()
@@ -294,6 +308,7 @@ class RadioToolApp:
         self._reset_state()
         self.save_button.configure(state="disabled")
         self.start_button.configure(state="disabled")
+        self.batch_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.status_var.set("Prüfe Stream...")
 
@@ -308,6 +323,193 @@ class RadioToolApp:
             daemon=True,
         )
         self._worker.start()
+
+    def start_batch_scan(self) -> None:
+        if self._worker and self._worker.is_alive():
+            messagebox.showinfo("Läuft bereits", "Es läuft bereits eine Überwachung oder ein Batchtest.")
+            return
+
+        default_base = Path(__file__).resolve().parent.parent / "dokumente"
+        preferred = default_base / "senderlisten_und_batchtests"
+        default_dir = str(preferred if preferred.is_dir() else default_base)
+        path = filedialog.askopenfilename(
+            title="Senderliste auswählen",
+            initialdir=default_dir if Path(default_dir).is_dir() else str(Path(__file__).resolve().parent.parent),
+            filetypes=(
+                ("Text/Markdown", "*.txt *.md *.csv"),
+                ("Alle Dateien", "*.*"),
+            ),
+        )
+        if not path:
+            return
+
+        stations = self._load_batch_stations(path)
+        if not stations:
+            messagebox.showwarning("Leere Liste", "In der ausgewählten Datei wurden keine Sender gefunden.")
+            return
+
+        self._reset_state()
+        self.save_button.configure(state="disabled")
+        self.start_button.configure(state="disabled")
+        self.batch_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
+        self.status_var.set(f"Batchtest startet ({len(stations)} Sender)...")
+        self.logger.log(f"Batchtest gestartet: {path} ({len(stations)} Sender)")
+
+        self._worker = threading.Thread(
+            target=self._batch_worker,
+            args=(stations, path),
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _load_batch_stations(self, path: str) -> list[str]:
+        stations: list[str] = []
+        seen = set()
+        try:
+            raw_text = Path(path).read_text(encoding="utf-8")
+        except Exception:
+            raw_text = Path(path).read_text(encoding="latin-1")
+
+        for raw_line in raw_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                continue
+            if line.startswith(("-", "*")):
+                line = line[1:].strip()
+            if not line:
+                continue
+            if ";" in line:
+                line = line.split(";", 1)[0].strip()
+            key = line.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            stations.append(line)
+        return stations
+
+    def _batch_worker(self, stations: list[str], source_path: str) -> None:
+        resolver = StreamResolver(self.logger.log)
+        fetcher = SongMetadataFetcher(self.logger.log)
+        lookup = StationLookupService(self.logger.log)
+        now_playing_discovery = NowPlayingDiscoveryService(self.logger.log)
+
+        rows: list[tuple[str, str, str]] = []
+        total = len(stations)
+
+        try:
+            for idx, query in enumerate(stations, start=1):
+                if self._stop_event.is_set():
+                    break
+
+                self._results.put(("batch_progress", f"Batchtest {idx}/{total}: {query}"))
+                self.logger.log(f"[Batch {idx}/{total}] Starte Analyse für: {query}")
+
+                result_kind = "leer"
+                result_value = "no_hit"
+                station: StationMatch | None = None
+
+                try:
+                    stream_seed = query
+                    if not is_probable_url(query):
+                        station = lookup.find_best_match(query)
+                        stream_seed = station.stream_url
+
+                    resolved = resolver.resolve(stream_seed, original_input=query)
+                    if station:
+                        resolved.station_name = station.name
+                    station_name = station.name if station else query
+                    station_slug = (station.stationuuid or "").strip() if station else ""
+                    station_hints = [station_name, station_slug, ""]
+                    invalid_values = ["Unknown", "Radio Stream", "Internet Radio", "", station_name]
+
+                    stream_song: SongInfo | None = None
+                    try:
+                        stream_song = fetcher.fetch(resolved.resolved_url)
+                    except Exception as err:
+                        result_value = f"icy_error:{err}"
+
+                    if stream_song:
+                        a, t, state = prefilter_pair(
+                            stream_song.artist,
+                            stream_song.title,
+                            source="icy",
+                            station_name=station_name,
+                            invalid_values=invalid_values,
+                            station_hint_values=station_hints,
+                        )
+                        if state == "ok":
+                            result_kind = "song"
+                            result_value = f"{a} - {t}"
+                        else:
+                            result_value = state
+
+                    if result_kind != "song":
+                        feed_candidates = now_playing_discovery.discover_candidate_urls(
+                            resolved=resolved,
+                            station=station,
+                            stream_headers=stream_song.source_headers if stream_song else {},
+                        )
+                        feed_song = now_playing_discovery.fetch_now_playing(
+                            feed_candidates,
+                            station_name=station_name,
+                        )
+                        if feed_song:
+                            a, t, state = prefilter_pair(
+                                feed_song.artist,
+                                feed_song.title,
+                                source="api",
+                                station_name=station_name,
+                                invalid_values=invalid_values,
+                                station_hint_values=station_hints,
+                            )
+                            if state == "ok":
+                                result_kind = "song"
+                                result_value = f"{a} - {t}"
+                            else:
+                                result_value = state
+                        elif result_value in {"no_hit", ""}:
+                            result_value = "no_feed_song"
+
+                except Exception as err:
+                    result_kind = "leer"
+                    result_value = f"resolve_error:{err}"
+
+                rows.append((query, result_kind, result_value))
+                self.logger.log(f"[Batch {idx}/{total}] {query} -> {result_kind}: {result_value}")
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            batch_dir = Path(__file__).resolve().parent.parent / "dokumente" / "senderlisten_und_batchtests"
+            batch_dir.mkdir(parents=True, exist_ok=True)
+            out_path = batch_dir / f"batchtest_result_{timestamp}.tsv"
+            with out_path.open("w", encoding="utf-8") as handle:
+                handle.write("sender\tergebnis\twert\n")
+                for sender, result_kind, result_value in rows:
+                    safe_sender = sender.replace("\t", " ").strip()
+                    safe_kind = result_kind.replace("\t", " ").strip()
+                    safe_value = result_value.replace("\t", " ").strip()
+                    handle.write(f"{safe_sender}\t{safe_kind}\t{safe_value}\n")
+
+            songs = sum(1 for _, kind, _ in rows if kind == "song")
+            empty = sum(1 for _, kind, _ in rows if kind != "song")
+            summary = f"Batchtest fertig: {songs} Song, {empty} leer ({len(rows)} gesamt)"
+            self.logger.log(summary)
+            self._results.put(
+                (
+                    "batch_done",
+                    {
+                        "result_path": str(out_path),
+                        "summary": summary,
+                    },
+                )
+            )
+        except Exception as err:  # pragma: no cover
+            self.logger.log(f"Batchtest abgebrochen: {err}")
+            self._results.put(("error", f"Batchtest fehlgeschlagen: {err}"))
+        finally:
+            self._results.put(("done", None))
 
     def _reset_state(self) -> None:
         self._stop_event.clear()

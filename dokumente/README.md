@@ -10,6 +10,7 @@ Diese Dokumentation beschreibt das Tool vollstaendig aus Anwendersicht und aus t
 4. [Now-Playing-Discovery und Origin-Regeln](./04_NowPlaying_und_Origin_Regeln.md)
 5. [Datenbank, Konfiguration und Betrieb](./05_Datenbank_Konfiguration_Betrieb.md)
 6. [Entwicklerdokumentation](./06_Entwicklerdokumentation.md)
+7. [Senderlisten und Batchtests](./senderlisten_und_batchtests/README.md)
 
 ## Schnellstart
 

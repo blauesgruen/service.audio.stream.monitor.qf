@@ -766,6 +766,14 @@ class StationLookupService:
                     variants.append(dotted_variant)
                     if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
                         return variants
+                for compound_variant in self._expand_compound_token_variants(candidate):
+                    compound_key = compound_variant.lower()
+                    if compound_key in seen:
+                        continue
+                    seen.add(compound_key)
+                    variants.append(compound_variant)
+                    if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
+                        return variants
                 compacted = self._compact_alpha_digit_tokens(candidate)
                 if compacted and compacted.lower() not in seen:
                     seen.add(compacted.lower())
@@ -774,8 +782,16 @@ class StationLookupService:
                         dotted_key = dotted_variant.lower()
                         if dotted_key in seen:
                             continue
-                        seen.add(dotted_key)
-                        variants.append(dotted_variant)
+                            seen.add(dotted_key)
+                            variants.append(dotted_variant)
+                            if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
+                                return variants
+                    for compound_variant in self._expand_compound_token_variants(compacted):
+                        compound_key = compound_variant.lower()
+                        if compound_key in seen:
+                            continue
+                        seen.add(compound_key)
+                        variants.append(compound_variant)
                         if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
                             return variants
                 if len(variants) >= STATION_LOOKUP_MAX_QUERY_VARIANTS:
@@ -1085,6 +1101,87 @@ class StationLookupService:
                 continue
             seen.add(key)
             variants.append(candidate)
+        return variants
+
+    def _expand_compound_token_variants(self, value: str) -> list[str]:
+        normalized = re.sub(r"\s+", " ", (value or "").strip().lower())
+        tokens = split_search_tokens(normalized)
+        if len(tokens) != 1:
+            return []
+        token = tokens[0]
+        if len(token) < 6:
+            return []
+
+        fragment_map = {
+            "rheinlandpfalz": "rheinland pfalz",
+            "badenwuerttemberg": "baden wuerttemberg",
+            "sachsenanhalt": "sachsen anhalt",
+            "kulturradio": "kultur radio",
+            "saarlandwelle": "saarland welle",
+            "europawelle": "europa welle",
+            "classicrock": "classic rock",
+        }
+        prefix_tokens = (
+            "deutschlandfunk",
+            "antenne",
+            "radio",
+            "energy",
+            "bigfm",
+            "sunshine",
+            "hitradio",
+            "absolut",
+        )
+        suffix_tokens = (
+            "kultur",
+            "nova",
+            "info",
+            "aktuell",
+            "hamburg",
+            "berlin",
+            "koeln",
+            "muenchen",
+            "chillout",
+            "classicrock",
+            "relax",
+            "hot",
+        )
+
+        def split_fragment(fragment: str) -> str:
+            clean = fragment_map.get(fragment, fragment)
+            return re.sub(r"\s+", " ", clean).strip()
+
+        variants: list[str] = []
+        seen = {normalized}
+
+        def add(candidate: str) -> None:
+            clean = re.sub(r"\s+", " ", (candidate or "").strip().lower())
+            if not clean or clean in seen:
+                return
+            seen.add(clean)
+            variants.append(clean)
+
+        # Examples: swr1rheinlandpfalz, ndr3, sr2kulturradio
+        mixed_match = re.match(r"^([^\W\d_]{2,})([0-9]{1,2})([^\W\d_]{0,})$", token, flags=re.IGNORECASE)
+        if mixed_match:
+            prefix = mixed_match.group(1)
+            number = mixed_match.group(2)
+            tail = split_fragment(mixed_match.group(3))
+            if tail:
+                add(f"{prefix}{number} {tail}")
+                add(f"{prefix} {number} {tail}")
+            else:
+                add(f"{prefix} {number}")
+
+        for prefix in prefix_tokens:
+            if token.startswith(prefix) and len(token) > len(prefix) + 2:
+                rest = split_fragment(token[len(prefix) :])
+                add(f"{prefix} {rest}")
+
+        for suffix in suffix_tokens:
+            if token.endswith(suffix) and len(token) > len(suffix) + 2:
+                head = split_fragment(token[: -len(suffix)])
+                add(f"{head} {suffix}")
+
         return variants
 
     def _build_signature_tokens(self, value: str) -> set[str]:

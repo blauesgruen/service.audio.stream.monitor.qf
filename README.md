@@ -39,6 +39,7 @@ python3 main.py
 - [Now-Playing-Discovery und Origin-Regeln](./dokumente/04_NowPlaying_und_Origin_Regeln.md)
 - [Datenbank, Konfiguration und Betrieb](./dokumente/05_Datenbank_Konfiguration_Betrieb.md)
 - [Entwicklerdokumentation](./dokumente/06_Entwicklerdokumentation.md)
+- [Senderlisten und Batchtests](./dokumente/senderlisten_und_batchtests/README.md)
 
 ## Verifizierung + DB
 Eine Quelle gilt als verifiziert, sobald eine Stream-URL aufgelöst und Song-Metadaten erkannt wurden.
