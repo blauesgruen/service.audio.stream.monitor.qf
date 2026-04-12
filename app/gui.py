@@ -583,8 +583,8 @@ class RadioToolApp:
                     safe_found_station = found_station_name.replace("\t", " ").strip()
                     handle.write(f"{safe_sender}\t{safe_kind}\t{safe_value}\t{safe_found_station}\n")
 
-            songs = sum(1 for _, kind, _ in rows if kind == "song")
-            empty = sum(1 for _, kind, _ in rows if kind != "song")
+            songs = sum(1 for _, kind, _, _ in rows if kind == "song")
+            empty = sum(1 for _, kind, _, _ in rows if kind != "song")
             summary = f"Batchtest fertig: {songs} Song, {empty} leer ({len(rows)} gesamt)"
             self.logger.log(summary)
             self._results.put(
