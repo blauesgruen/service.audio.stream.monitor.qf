@@ -207,9 +207,22 @@ class NowPlayingDiscoveryService:
             self._log("Keine Now-Playing Kandidaten gefunden")
         return limited
 
-    def fetch_now_playing(self, candidate_urls: list[str], station_name: str = "") -> SongInfo | None:
+    def fetch_now_playing(
+        self,
+        candidate_urls: list[str],
+        station_name: str = "",
+        max_candidates: int = 0,
+        max_elapsed_seconds: float = 0.0,
+    ) -> SongInfo | None:
         partial_match: SongInfo | None = None
-        for url in candidate_urls[:DISCOVERY_MAX_CANDIDATES]:
+        started_at = time.time()
+        limit = DISCOVERY_MAX_CANDIDATES
+        if int(max_candidates or 0) > 0:
+            limit = min(limit, int(max_candidates))
+
+        for url in candidate_urls[:limit]:
+            if max_elapsed_seconds and (time.time() - started_at) > float(max_elapsed_seconds):
+                break
             request_url = url if self._looks_like_html_nowplaying_endpoint(url) else self._cache_bust_url(url)
             text, content_type = self._fetch_text(request_url)
             if not text:
