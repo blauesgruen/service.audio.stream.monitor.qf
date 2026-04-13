@@ -31,7 +31,7 @@ MDR Sachsen
 MDR Sachsen-Anhalt
 MDR Thüringen
 hr1
-hr2
+hr2 kultur
 hr3
 hr4
 hr-iNFO
@@ -89,7 +89,6 @@ Radio Euroherz
 Radio Mainwelle
 Radio Plassenburg
 Radio Primaton
-Radio Live
 Radio Bielefeld
 Radio Duisburg
 Radio Essen

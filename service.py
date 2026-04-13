@@ -532,7 +532,10 @@ class QFBridgeService(xbmc.Monitor):
         invalid_values = ["Unknown", "Radio Stream", "Internet Radio", "", station_name]
         station_hint_values = [station_name, station_slug, station_id_value]
 
-        def is_valid_qf_pair(artist, title):
+        feed_pair_state = "no_candidate"
+        stream_pair_state = "no_candidate"
+
+        def validate_qf_pair(artist, title):
             a, t, state = self.prefilter_pair(
                 artist,
                 title,
@@ -541,51 +544,7 @@ class QFBridgeService(xbmc.Monitor):
                 invalid_values=invalid_values,
                 station_hint_values=station_hint_values,
             )
-            return bool(a and t and state == "ok")
-
-        if stream_song and is_valid_qf_pair(
-            stream_song.artist,
-            stream_song.title,
-        ):
-            allowed, approval = classify_source(stream_song.source_url)
-            if allowed:
-                verified_source_url = (stream_song.source_url or "").strip() or resolved.resolved_url
-                self._record_verified_source(
-                    station_name=station_name,
-                    source_url=verified_source_url,
-                    confidence=0.95,
-                    station_id=station_id,
-                    meta={
-                        "station_input": station_input,
-                        "station_id": station_id,
-                        "source_approval": approval,
-                        "source_kind_raw": stream_song.source_kind,
-                        "resolved_url": resolved.resolved_url,
-                        "delivery_url": resolved.delivery_url or "",
-                    },
-                )
-                return {
-                    "status": "hit",
-                    "artist": stream_song.artist,
-                    "title": stream_song.title,
-                    "source": stream_song.source_kind,
-                    "reason": "station_name_match",
-                    "meta": {**meta, "source_approval": approval, "source_url": stream_song.source_url},
-                }
-            self.logger.debug(
-                "song_source_blocked",
-                station=station_name,
-                source_url=stream_song.source_url,
-                source_kind=stream_song.source_kind,
-            )
-            return {
-                "status": "blocked",
-                "artist": "",
-                "title": "",
-                "source": stream_song.source_kind,
-                "reason": "blocked_non_allowed_source",
-                "meta": {**meta, "source_url": stream_song.source_url},
-            }
+            return a, t, state
 
         stream_headers = stream_song.source_headers if stream_song else {}
         feed_candidates = discovery.discover_candidate_urls(
@@ -594,11 +553,21 @@ class QFBridgeService(xbmc.Monitor):
             stream_headers=stream_headers,
         )
         probe_candidates = discovery.filter_official_html_candidates(feed_candidates, station) or feed_candidates
-        feed_song = discovery.fetch_now_playing(probe_candidates, station_name=station_name)
-        if feed_song and is_valid_qf_pair(
-            feed_song.artist,
-            feed_song.title,
-        ):
+        feed_song = None
+        feed_retry_attempts = 3
+        feed_retry_delay_seconds = 0.35
+        for attempt in range(1, feed_retry_attempts + 1):
+            feed_song = discovery.fetch_now_playing(probe_candidates, station_name=station_name)
+            if not feed_song:
+                feed_pair_state = "missing_field"
+            else:
+                _, _, feed_pair_state = validate_qf_pair(feed_song.artist, feed_song.title)
+                if feed_pair_state == "ok":
+                    break
+            if attempt < feed_retry_attempts:
+                time.sleep(feed_retry_delay_seconds)
+
+        if feed_song and feed_pair_state == "ok":
             allowed, approval = classify_source(feed_song.source_url)
             if allowed:
                 verified_source_url = (feed_song.source_url or "").strip() or resolved.resolved_url
@@ -639,10 +608,75 @@ class QFBridgeService(xbmc.Monitor):
                 "meta": {**meta, "source_url": feed_song.source_url},
             }
 
+        if feed_song and feed_pair_state != "ok":
+            self.logger.debug(
+                "song_pair_rejected",
+                source_kind=feed_song.source_kind,
+                source_url=feed_song.source_url,
+                state=feed_pair_state,
+                artist=feed_song.artist,
+                title=feed_song.title,
+            )
+
+        if stream_song:
+            _, _, stream_pair_state = validate_qf_pair(stream_song.artist, stream_song.title)
+        if stream_song and stream_pair_state == "ok":
+            allowed, approval = classify_source(stream_song.source_url)
+            if allowed:
+                verified_source_url = (stream_song.source_url or "").strip() or resolved.resolved_url
+                self._record_verified_source(
+                    station_name=station_name,
+                    source_url=verified_source_url,
+                    confidence=0.95,
+                    station_id=station_id,
+                    meta={
+                        "station_input": station_input,
+                        "station_id": station_id,
+                        "source_approval": approval,
+                        "source_kind_raw": stream_song.source_kind,
+                        "resolved_url": resolved.resolved_url,
+                        "delivery_url": resolved.delivery_url or "",
+                    },
+                )
+                return {
+                    "status": "hit",
+                    "artist": stream_song.artist,
+                    "title": stream_song.title,
+                    "source": stream_song.source_kind,
+                    "reason": "station_name_match",
+                    "meta": {**meta, "source_approval": approval, "source_url": stream_song.source_url},
+                }
+            self.logger.debug(
+                "song_source_blocked",
+                station=station_name,
+                source_url=stream_song.source_url,
+                source_kind=stream_song.source_kind,
+            )
+            return {
+                "status": "blocked",
+                "artist": "",
+                "title": "",
+                "source": stream_song.source_kind,
+                "reason": "blocked_non_allowed_source",
+                "meta": {**meta, "source_url": stream_song.source_url},
+            }
+
+        if stream_song and stream_pair_state != "ok":
+            self.logger.debug(
+                "song_pair_rejected",
+                source_kind=stream_song.source_kind,
+                source_url=stream_song.source_url,
+                state=stream_pair_state,
+                artist=stream_song.artist,
+                title=stream_song.title,
+            )
+
         reason = "generic_or_non_song"
         if stream_error:
             reason = "no_stream_title"
             meta["stream_error"] = stream_error
+        meta["feed_pair_state"] = feed_pair_state
+        meta["stream_pair_state"] = stream_pair_state
         return {
             "status": "no_hit",
             "artist": "",
