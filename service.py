@@ -95,6 +95,14 @@ class QFBridgeService(xbmc.Monitor):
         self._import_error = ""
         self._resolution_cache: dict[str, dict] = {}
         self._resolution_cache_ttl_seconds = 180
+        self._qf_station_state: dict[str, dict] = {}
+        self.QF_SERVICE_GUI_PARITY_ENABLED = False
+        self.QF_HOLD_SECONDS = 0.0
+        self.QF_NO_HIT_CONFIRM = 1
+        self.QF_EMPTY_CONFIRM = 1
+        self.QF_FEED_RETRY_ATTEMPTS = 3
+        self.QF_FEED_RETRY_DELAY_SECONDS = 0.35
+        self.QF_STATE_MAX_STATIONS = 64
 
     def _get_setting_bool(self, key, default=False):
         try:
@@ -134,7 +142,17 @@ class QFBridgeService(xbmc.Monitor):
 
         try:
             # Import lazily so addon can stay installed even without active bridge.
-            from app.config import ALLOW_OFFICIAL_CHAIN_SOURCES, ORIGIN_ONLY_MODE
+            from app.config import (
+                ALLOW_OFFICIAL_CHAIN_SOURCES,
+                ORIGIN_ONLY_MODE,
+                QF_EMPTY_CONFIRM,
+                QF_FEED_RETRY_ATTEMPTS,
+                QF_FEED_RETRY_DELAY_SECONDS,
+                QF_HOLD_SECONDS,
+                QF_NO_HIT_CONFIRM,
+                QF_SERVICE_GUI_PARITY_ENABLED,
+                QF_STATE_MAX_STATIONS,
+            )
             from app.metadata import SongMetadataFetcher
             from app.now_playing_discovery import NowPlayingDiscoveryService
             from app.song_validation import prefilter_pair
@@ -156,6 +174,13 @@ class QFBridgeService(xbmc.Monitor):
         self._import_error = ""
         self.ALLOW_OFFICIAL_CHAIN_SOURCES = ALLOW_OFFICIAL_CHAIN_SOURCES
         self.ORIGIN_ONLY_MODE = ORIGIN_ONLY_MODE
+        self.QF_SERVICE_GUI_PARITY_ENABLED = bool(QF_SERVICE_GUI_PARITY_ENABLED)
+        self.QF_HOLD_SECONDS = max(0.0, float(QF_HOLD_SECONDS))
+        self.QF_NO_HIT_CONFIRM = max(1, int(QF_NO_HIT_CONFIRM))
+        self.QF_EMPTY_CONFIRM = max(1, int(QF_EMPTY_CONFIRM))
+        self.QF_FEED_RETRY_ATTEMPTS = max(1, int(QF_FEED_RETRY_ATTEMPTS))
+        self.QF_FEED_RETRY_DELAY_SECONDS = max(0.0, float(QF_FEED_RETRY_DELAY_SECONDS))
+        self.QF_STATE_MAX_STATIONS = max(16, int(QF_STATE_MAX_STATIONS))
         self.SongMetadataFetcher = SongMetadataFetcher
         self.NowPlayingDiscoveryService = NowPlayingDiscoveryService
         self.prefilter_pair = prefilter_pair
@@ -502,6 +527,307 @@ class QFBridgeService(xbmc.Monitor):
         )
         return True
 
+    def _get_station_state(self, station_key):
+        key = str(station_key or "").strip()
+        if not key:
+            key = "global"
+        state = self._qf_station_state.get(key)
+        if state:
+            return state
+        state = {
+            "station_key": key,
+            "last_hit_ts": 0.0,
+            "last_strong_hit_ts": 0.0,
+            "last_request_ts": 0.0,
+            "last_artist": "",
+            "last_title": "",
+            "last_source": "",
+            "last_reason": "",
+            "last_no_hit_reason": "",
+            "last_meta": {},
+            "pending_hit_key": "",
+            "pending_hit_count": 0,
+            "pending_hit_ts": 0.0,
+            "no_hit_streak": 0,
+            "empty_streak": 0,
+            "updated_ts": 0.0,
+        }
+        self._qf_station_state[key] = state
+        return state
+
+    def _prune_station_state(self):
+        max_items = max(16, int(self.QF_STATE_MAX_STATIONS or 64))
+        if len(self._qf_station_state) <= max_items:
+            return
+        oldest_key = min(
+            self._qf_station_state,
+            key=lambda item_key: float(self._qf_station_state[item_key].get("updated_ts") or 0.0),
+        )
+        self._qf_station_state.pop(oldest_key, None)
+
+    def _trace_qf_decision(self, station_key, action, result, state, **extra):
+        meta = result.get("meta") or {}
+        effective_hold_seconds = extra.pop("effective_hold_seconds", self.QF_HOLD_SECONDS)
+        self.logger.debug(
+            "qf_decision_trace",
+            station_key=station_key,
+            action=action,
+            status=result.get("status") or "",
+            reason=result.get("reason") or "",
+            source=result.get("source") or "",
+            artist=result.get("artist") or "",
+            title=result.get("title") or "",
+            feed_pair_state=meta.get("feed_pair_state") or "",
+            stream_pair_state=meta.get("stream_pair_state") or "",
+            hold_seconds=round(float(effective_hold_seconds), 3),
+            no_hit_streak=state.get("no_hit_streak") or 0,
+            empty_streak=state.get("empty_streak") or 0,
+            last_hit_age=extra.pop("last_hit_age", ""),
+            hold_remaining=extra.pop("hold_remaining", ""),
+            request_gap=extra.pop("request_gap", ""),
+            **extra,
+        )
+
+    def _apply_qf_parity_policy(self, station_key, result):
+        state = self._get_station_state(station_key)
+        now = time.time()
+        last_request_ts = float(state.get("last_request_ts") or 0.0)
+        request_gap = (now - last_request_ts) if last_request_ts > 0 else 0.0
+        state["last_request_ts"] = now
+        state["updated_ts"] = now
+        status = str(result.get("status") or "")
+        reason = str(result.get("reason") or "")
+        artist = str(result.get("artist") or "")
+        title = str(result.get("title") or "")
+        source = str(result.get("source") or "")
+        meta = result.get("meta") or {}
+        effective_hold_seconds = float(self.QF_HOLD_SECONDS)
+        if request_gap > 0.0:
+            # Hold at least one real request gap (+small buffer) to avoid false no_hit between sparse polls.
+            effective_hold_seconds = max(effective_hold_seconds, min(90.0, request_gap + 2.0))
+
+        def _clear_pending_hit():
+            state["pending_hit_key"] = ""
+            state["pending_hit_count"] = 0
+            state["pending_hit_ts"] = 0.0
+
+        if status == "hit" and artist and title:
+            has_last_pair_before = bool(state.get("last_artist") and state.get("last_title"))
+            stream_pair_state = str(meta.get("stream_pair_state") or "")
+            is_feed_hit = str(source).startswith("web_feed_")
+            weak_stream_signal = stream_pair_state in {"", "no_candidate", "missing_field"}
+            if self.QF_SERVICE_GUI_PARITY_ENABLED and is_feed_hit and weak_stream_signal and not has_last_pair_before:
+                pending_key = f"{artist.lower()}|{title.lower()}|{source}"
+                previous_key = str(state.get("pending_hit_key") or "")
+                previous_count = int(state.get("pending_hit_count") or 0)
+                if pending_key == previous_key and previous_count > 0:
+                    state["pending_hit_count"] = previous_count + 1
+                else:
+                    state["pending_hit_key"] = pending_key
+                    state["pending_hit_count"] = 1
+                state["pending_hit_ts"] = now
+
+                if int(state.get("pending_hit_count") or 0) < 2:
+                    pending_result = {
+                        "status": "no_hit",
+                        "artist": "",
+                        "title": "",
+                        "source": "",
+                        "reason": "pending_feed_confirmation",
+                        "meta": {
+                            **meta,
+                            "pending_hit": True,
+                            "pending_hit_count": state.get("pending_hit_count") or 0,
+                            "pending_pair": f"{artist} - {title}",
+                        },
+                    }
+                    self._trace_qf_decision(
+                        station_key,
+                        "pending_hit",
+                        pending_result,
+                        state,
+                        last_hit_age="",
+                        hold_remaining=0.0,
+                        request_gap=round(request_gap, 3),
+                        effective_hold_seconds=effective_hold_seconds,
+                    )
+                    self._prune_station_state()
+                    return pending_result
+
+                _clear_pending_hit()
+            else:
+                _clear_pending_hit()
+
+            # GUI-parity guard: if we only keep seeing the same feed pair without stream support,
+            # do not let that stale feed keep the song alive forever.
+            if status == "hit" and is_feed_hit and weak_stream_signal and has_last_pair_before:
+                same_pair = (
+                    artist.strip().lower() == str(state.get("last_artist") or "").strip().lower()
+                    and title.strip().lower() == str(state.get("last_title") or "").strip().lower()
+                )
+                reference_ts = float(state.get("last_strong_hit_ts") or 0.0)
+                if reference_ts <= 0.0:
+                    reference_ts = float(state.get("last_hit_ts") or 0.0)
+                weak_age = (now - reference_ts) if reference_ts > 0.0 else 0.0
+                if same_pair and reference_ts > 0.0 and weak_age > effective_hold_seconds:
+                    status = "no_hit"
+                    reason = "generic_or_non_song"
+                    artist = ""
+                    title = ""
+                    source = ""
+                    meta = {
+                        **meta,
+                        "stale_feed_only": True,
+                        "stale_feed_age": round(weak_age, 3),
+                        "stale_feed_hold": round(effective_hold_seconds, 3),
+                    }
+                    result = {
+                        "status": status,
+                        "artist": artist,
+                        "title": title,
+                        "source": source,
+                        "reason": reason,
+                        "meta": meta,
+                    }
+
+        if status == "hit" and artist and title:
+            stream_pair_state = str(meta.get("stream_pair_state") or "")
+            is_feed_hit = str(source).startswith("web_feed_")
+            weak_stream_signal = stream_pair_state in {"", "no_candidate", "missing_field"}
+
+            state["last_hit_ts"] = now
+            if not (is_feed_hit and weak_stream_signal):
+                state["last_strong_hit_ts"] = now
+            state["last_artist"] = artist
+            state["last_title"] = title
+            state["last_source"] = source
+            state["last_reason"] = reason
+            state["last_no_hit_reason"] = ""
+            state["last_meta"] = dict(meta)
+            state["no_hit_streak"] = 0
+            state["empty_streak"] = 0
+            self._trace_qf_decision(
+                station_key,
+                "accept_hit",
+                result,
+                state,
+                last_hit_age=0.0,
+                hold_remaining=round(effective_hold_seconds, 3),
+                request_gap=round(request_gap, 3),
+                effective_hold_seconds=effective_hold_seconds,
+            )
+            self._prune_station_state()
+            return result
+
+        if status != "no_hit" or not self.QF_SERVICE_GUI_PARITY_ENABLED:
+            if status == "no_hit":
+                state["last_no_hit_reason"] = reason
+                state["no_hit_streak"] = int(state.get("no_hit_streak") or 0) + 1
+            self._trace_qf_decision(
+                station_key,
+                "passthrough",
+                result,
+                state,
+                request_gap=round(request_gap, 3),
+                effective_hold_seconds=effective_hold_seconds,
+            )
+            self._prune_station_state()
+            return result
+
+        state["last_no_hit_reason"] = reason
+        state["no_hit_streak"] = int(state.get("no_hit_streak") or 0) + 1
+
+        feed_pair_state = str(meta.get("feed_pair_state") or "")
+        stream_pair_state = str(meta.get("stream_pair_state") or "")
+        empty_signals = {"missing_field", "no_candidate"}
+        is_empty_signal = reason == "generic_or_non_song" and (
+            feed_pair_state in empty_signals or stream_pair_state in empty_signals
+        )
+        if is_empty_signal:
+            state["empty_streak"] = int(state.get("empty_streak") or 0) + 1
+        else:
+            state["empty_streak"] = 0
+
+        last_hit_ts = float(state.get("last_hit_ts") or 0.0)
+        has_last_pair = bool(state.get("last_artist") and state.get("last_title"))
+        last_hit_age = (now - last_hit_ts) if last_hit_ts > 0 else float("inf")
+        hold_remaining = max(0.0, effective_hold_seconds - last_hit_age) if has_last_pair else 0.0
+        hold_active = has_last_pair and hold_remaining > 0
+
+        if hold_active:
+            hold_result = {
+                "status": "hit",
+                "artist": state.get("last_artist") or "",
+                "title": state.get("last_title") or "",
+                "source": state.get("last_source") or "asm-qf_hold",
+                "reason": "hold_last_song",
+                "meta": {
+                    **(state.get("last_meta") or {}),
+                    "hold": True,
+                    "hold_remaining": round(hold_remaining, 3),
+                    "hold_seconds": round(effective_hold_seconds, 3),
+                    "no_hit_reason": reason,
+                    "no_hit_streak": state.get("no_hit_streak") or 0,
+                    "empty_streak": state.get("empty_streak") or 0,
+                    "feed_pair_state": feed_pair_state,
+                    "stream_pair_state": stream_pair_state,
+                },
+            }
+            self._trace_qf_decision(
+                station_key,
+                "hold_last_song",
+                hold_result,
+                state,
+                last_hit_age=round(last_hit_age, 3),
+                hold_remaining=round(hold_remaining, 3),
+                request_gap=round(request_gap, 3),
+                effective_hold_seconds=effective_hold_seconds,
+            )
+            self._prune_station_state()
+            return hold_result
+
+        no_hit_confirmed = int(state.get("no_hit_streak") or 0) >= int(self.QF_NO_HIT_CONFIRM)
+        empty_confirmed = int(state.get("empty_streak") or 0) >= int(self.QF_EMPTY_CONFIRM)
+
+        if no_hit_confirmed or empty_confirmed:
+            state["last_artist"] = ""
+            state["last_title"] = ""
+            state["last_source"] = ""
+            state["last_reason"] = ""
+            state["last_meta"] = {}
+            state["last_hit_ts"] = 0.0
+            state["last_strong_hit_ts"] = 0.0
+            state["no_hit_streak"] = 0
+            state["empty_streak"] = 0
+            _clear_pending_hit()
+            self._trace_qf_decision(
+                station_key,
+                "confirm_no_hit",
+                result,
+                state,
+                last_hit_age=round(last_hit_age, 3) if last_hit_age != float("inf") else "",
+                hold_remaining=0.0,
+                request_gap=round(request_gap, 3),
+                effective_hold_seconds=effective_hold_seconds,
+                no_hit_confirmed=no_hit_confirmed,
+                empty_confirmed=empty_confirmed,
+            )
+            self._prune_station_state()
+            return result
+
+        self._trace_qf_decision(
+            station_key,
+            "soft_no_hit",
+            result,
+            state,
+            last_hit_age=round(last_hit_age, 3) if last_hit_age != float("inf") else "",
+            hold_remaining=0.0,
+            request_gap=round(request_gap, 3),
+            effective_hold_seconds=effective_hold_seconds,
+        )
+        self._prune_station_state()
+        return result
+
     def _resolve_song(self, station_input, station_id=""):
         lookup = self.StationLookupService(lambda msg: self.logger.debug("core_trace", message=msg))
         resolver = self.StreamResolver(lambda msg: self.logger.debug("core_trace", message=msg))
@@ -601,6 +927,8 @@ class QFBridgeService(xbmc.Monitor):
             return a, t, state
 
         stream_headers = stream_song.source_headers if stream_song else {}
+        if stream_song:
+            _, _, stream_pair_state = validate_qf_pair(stream_song.artist, stream_song.title)
         feed_candidates = discovery.discover_candidate_urls(
             resolved=resolved,
             station=station,
@@ -608,8 +936,8 @@ class QFBridgeService(xbmc.Monitor):
         )
         probe_candidates = discovery.filter_official_html_candidates(feed_candidates, station) or feed_candidates
         feed_song = None
-        feed_retry_attempts = 3
-        feed_retry_delay_seconds = 0.35
+        feed_retry_attempts = int(self.QF_FEED_RETRY_ATTEMPTS)
+        feed_retry_delay_seconds = float(self.QF_FEED_RETRY_DELAY_SECONDS)
         for attempt in range(1, feed_retry_attempts + 1):
             feed_song = discovery.fetch_now_playing(probe_candidates, station_name=station_name)
             if not feed_song:
@@ -645,7 +973,14 @@ class QFBridgeService(xbmc.Monitor):
                     "title": feed_song.title,
                     "source": feed_song.source_kind,
                     "reason": "station_name_match",
-                    "meta": {**meta, "source_approval": approval, "source_url": feed_song.source_url},
+                    "meta": {
+                        **meta,
+                        "source_approval": approval,
+                        "source_url": feed_song.source_url,
+                        "feed_pair_state": feed_pair_state,
+                        "stream_pair_state": stream_pair_state,
+                        "feed_age_minutes": feed_song.age_minutes,
+                    },
                 }
             self.logger.debug(
                 "song_source_blocked",
@@ -672,8 +1007,6 @@ class QFBridgeService(xbmc.Monitor):
                 title=feed_song.title,
             )
 
-        if stream_song:
-            _, _, stream_pair_state = validate_qf_pair(stream_song.artist, stream_song.title)
         if stream_song and stream_pair_state == "ok":
             allowed, approval = classify_source(stream_song.source_url)
             if allowed:
@@ -780,6 +1113,7 @@ class QFBridgeService(xbmc.Monitor):
             return
 
         station_name = (station or "").strip()
+        station_key = self._build_station_key(station_name, station_id=station_id)
         if not station_name and not (station_id or "").strip():
             self.logger.info(
                 "request_nohit",
@@ -798,6 +1132,7 @@ class QFBridgeService(xbmc.Monitor):
 
         try:
             result = self._resolve_song(station_name, station_id=station_id)
+            result = self._apply_qf_parity_policy(station_key, result)
             self.logger.info(
                 "request_result",
                 req_id=req_id,
