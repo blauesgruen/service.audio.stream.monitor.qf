@@ -93,6 +93,8 @@ class QFBridgeService(xbmc.Monitor):
         self._imports_ready = False
         self._import_root = ""
         self._import_error = ""
+        self._resolution_cache: dict[str, dict] = {}
+        self._resolution_cache_ttl_seconds = 180
 
     def _get_setting_bool(self, key, default=False):
         try:
@@ -324,6 +326,46 @@ class QFBridgeService(xbmc.Monitor):
             return ""
         return f"name:{name_norm}"
 
+    def _build_resolution_cache_key(self, station_input, station_id=""):
+        station_id_norm = self._normalize_station_id(station_id)
+        if station_id_norm:
+            return f"stationid:{station_id_norm}"
+        text = str(station_input or "").strip()
+        if not text:
+            return ""
+        if self.is_probable_url(text):
+            return f"url:{self._normalize_url(text)}"
+        return f"name:{self._normalize_station_name(text)}"
+
+    def _get_cached_resolution(self, cache_key):
+        if not cache_key:
+            return None
+        item = self._resolution_cache.get(cache_key)
+        if not item:
+            return None
+        age = time.time() - float(item.get("ts") or 0.0)
+        if age > float(self._resolution_cache_ttl_seconds):
+            self._resolution_cache.pop(cache_key, None)
+            return None
+        return item
+
+    def _store_cached_resolution(self, cache_key, station, resolved, origin_domains):
+        if not cache_key or not resolved:
+            return
+        self._resolution_cache[cache_key] = {
+            "ts": time.time(),
+            "station": station,
+            "resolved": resolved,
+            "origin_domains": sorted(origin_domains or []),
+        }
+        # Keep cache bounded for long-running Kodi sessions.
+        if len(self._resolution_cache) > 64:
+            oldest_key = min(
+                self._resolution_cache,
+                key=lambda key: float(self._resolution_cache[key].get("ts") or 0.0),
+            )
+            self._resolution_cache.pop(oldest_key, None)
+
     def _get_qf_db_path(self):
         addon_id = str(self.addon.getAddonInfo("id") or "").strip() or QF_ADDON_ID
         return _translate_path(
@@ -469,30 +511,42 @@ class QFBridgeService(xbmc.Monitor):
         station = None
         stream_seed = station_input
         station_id_norm = self._normalize_station_id(station_id)
-
-        if station_id_norm:
-            try:
-                station = lookup.find_by_id(station_id_norm)
-                stream_seed = station.stream_url
-                self.logger.debug("station_id_match_ok", id=station_id_norm, name=station.name)
-            except Exception as err:
-                self.logger.warning("station_id_lookup_failed", id=station_id_norm, error=str(err))
-                if not self.is_probable_url(station_input) and station_input:
-                    station = self._find_station_by_name_with_fallback(
-                        lookup,
-                        station_input,
-                        station_id_norm=station_id_norm,
-                    )
+        cache_key = self._build_resolution_cache_key(station_input, station_id=station_id)
+        cached = self._get_cached_resolution(cache_key)
+        if cached:
+            station = cached.get("station")
+            resolved = cached.get("resolved")
+            origin_domains = set(cached.get("origin_domains") or [])
+            self.logger.debug(
+                "resolution_cache_hit",
+                cache_key=cache_key,
+                station=station.name if station else station_input,
+            )
+        else:
+            if station_id_norm:
+                try:
+                    station = lookup.find_by_id(station_id_norm)
                     stream_seed = station.stream_url
-        elif not self.is_probable_url(station_input) and station_input:
-            station = self._find_station_by_name_with_fallback(lookup, station_input)
-            stream_seed = station.stream_url
+                    self.logger.debug("station_id_match_ok", id=station_id_norm, name=station.name)
+                except Exception as err:
+                    self.logger.warning("station_id_lookup_failed", id=station_id_norm, error=str(err))
+                    if not self.is_probable_url(station_input) and station_input:
+                        station = self._find_station_by_name_with_fallback(
+                            lookup,
+                            station_input,
+                            station_id_norm=station_id_norm,
+                        )
+                        stream_seed = station.stream_url
+            elif not self.is_probable_url(station_input) and station_input:
+                station = self._find_station_by_name_with_fallback(lookup, station_input)
+                stream_seed = station.stream_url
 
-        resolved = resolver.resolve(stream_seed, original_input=station_input)
-        if station:
-            resolved.station_name = station.name
+            resolved = resolver.resolve(stream_seed, original_input=station_input)
+            if station:
+                resolved.station_name = station.name
 
-        origin_domains = self._collect_origin_domains(station, resolved)
+            origin_domains = self._collect_origin_domains(station, resolved)
+            self._store_cached_resolution(cache_key, station, resolved, origin_domains)
 
         def classify_source(url):
             if not url:
