@@ -27,6 +27,7 @@ RES_SOURCE = "RadioMonitor.QF.Response.Source"
 RES_REASON = "RadioMonitor.QF.Response.Reason"
 RES_META = "RadioMonitor.QF.Response.Meta"
 RES_TS = "RadioMonitor.QF.Response.Ts"
+RES_FOR_REQ_ID = "RadioMonitor.QF.Response.ForReqId"
 
 QF_ADDON_ID = "service.audio.stream.monitor.qf"
 QF_VERIFIED_SOURCE_KIND = "qf_verified"
@@ -103,6 +104,11 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_FEED_RETRY_ATTEMPTS = 3
         self.QF_FEED_RETRY_DELAY_SECONDS = 0.35
         self.QF_STATE_MAX_STATIONS = 64
+        self.QF_REQUEST_GAP_BUFFER_SECONDS = 2.0
+        self.QF_REQUEST_GAP_MAX_SECONDS = 90.0
+        self.QF_REQUEST_GAP_USE_CLIENT_TS = True
+        self.QF_REQUEST_GAP_EMA_ALPHA = 0.4
+        self.QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY = False
 
     def _get_setting_bool(self, key, default=False):
         try:
@@ -150,6 +156,11 @@ class QFBridgeService(xbmc.Monitor):
                 QF_FEED_RETRY_DELAY_SECONDS,
                 QF_HOLD_SECONDS,
                 QF_NO_HIT_CONFIRM,
+                QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY,
+                QF_REQUEST_GAP_BUFFER_SECONDS,
+                QF_REQUEST_GAP_EMA_ALPHA,
+                QF_REQUEST_GAP_MAX_SECONDS,
+                QF_REQUEST_GAP_USE_CLIENT_TS,
                 QF_SERVICE_GUI_PARITY_ENABLED,
                 QF_STATE_MAX_STATIONS,
             )
@@ -181,6 +192,11 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_FEED_RETRY_ATTEMPTS = max(1, int(QF_FEED_RETRY_ATTEMPTS))
         self.QF_FEED_RETRY_DELAY_SECONDS = max(0.0, float(QF_FEED_RETRY_DELAY_SECONDS))
         self.QF_STATE_MAX_STATIONS = max(16, int(QF_STATE_MAX_STATIONS))
+        self.QF_REQUEST_GAP_BUFFER_SECONDS = max(0.0, float(QF_REQUEST_GAP_BUFFER_SECONDS))
+        self.QF_REQUEST_GAP_MAX_SECONDS = max(5.0, float(QF_REQUEST_GAP_MAX_SECONDS))
+        self.QF_REQUEST_GAP_USE_CLIENT_TS = bool(QF_REQUEST_GAP_USE_CLIENT_TS)
+        self.QF_REQUEST_GAP_EMA_ALPHA = min(1.0, max(0.05, float(QF_REQUEST_GAP_EMA_ALPHA)))
+        self.QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY = bool(QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY)
         self.SongMetadataFetcher = SongMetadataFetcher
         self.NowPlayingDiscoveryService = NowPlayingDiscoveryService
         self.prefilter_pair = prefilter_pair
@@ -204,10 +220,23 @@ class QFBridgeService(xbmc.Monitor):
         self._set_property(RES_REASON, "")
         self._set_property(RES_META, "")
         self._set_property(RES_TS, "")
+        self._set_property(RES_FOR_REQ_ID, "")
 
-    def _write_response(self, req_id, status, artist="", title="", source="", reason="", meta=None):
+    def _write_response(
+        self,
+        req_id,
+        status,
+        artist="",
+        title="",
+        source="",
+        reason="",
+        meta=None,
+        response_for_req_id="",
+        decision_latency_s=None,
+    ):
+        response_for_req_id = str(response_for_req_id or req_id or "").strip()
+        response_ts = int(time.time())
         self._clear_response()
-        self._set_property(RES_ID, req_id)
         self._set_property(RES_STATUS, status)
         self._set_property(RES_ARTIST, artist)
         self._set_property(RES_TITLE, title)
@@ -215,7 +244,19 @@ class QFBridgeService(xbmc.Monitor):
         self._set_property(RES_REASON, reason)
         if meta:
             self._set_property(RES_META, json.dumps(meta, ensure_ascii=False))
-        self._set_property(RES_TS, str(int(time.time())))
+        self._set_property(RES_TS, str(response_ts))
+        self._set_property(RES_FOR_REQ_ID, response_for_req_id)
+        # Write response id last so clients can treat it as commit marker.
+        self._set_property(RES_ID, req_id)
+        self.logger.info(
+            "response_written",
+            req_id=req_id,
+            response_for_req_id=response_for_req_id,
+            response_ts=response_ts,
+            status=status,
+            reason=reason,
+            decision_latency_s=decision_latency_s,
+        )
 
     def _collect_origin_domains(self, station, resolved):
         domains = set()
@@ -350,6 +391,21 @@ class QFBridgeService(xbmc.Monitor):
         if not name_norm:
             return ""
         return f"name:{name_norm}"
+
+    def _parse_request_ts(self, raw_value):
+        text = str(raw_value or "").strip()
+        if not text:
+            return 0.0
+        try:
+            value = float(text)
+        except Exception:
+            return 0.0
+        if value <= 0.0:
+            return 0.0
+        # Accept both epoch seconds and epoch milliseconds.
+        if value > 10_000_000_000:
+            value /= 1000.0
+        return value
 
     def _build_resolution_cache_key(self, station_input, station_id=""):
         station_id_norm = self._normalize_station_id(station_id)
@@ -539,6 +595,8 @@ class QFBridgeService(xbmc.Monitor):
             "last_hit_ts": 0.0,
             "last_strong_hit_ts": 0.0,
             "last_request_ts": 0.0,
+            "last_client_request_ts": 0.0,
+            "request_gap_ema": 0.0,
             "last_artist": "",
             "last_title": "",
             "last_source": "",
@@ -588,12 +646,39 @@ class QFBridgeService(xbmc.Monitor):
             **extra,
         )
 
-    def _apply_qf_parity_policy(self, station_key, result):
+    def _apply_qf_parity_policy(self, station_key, result, request_ts=0.0):
         state = self._get_station_state(station_key)
         now = time.time()
         last_request_ts = float(state.get("last_request_ts") or 0.0)
-        request_gap = (now - last_request_ts) if last_request_ts > 0 else 0.0
+        request_gap_server = (now - last_request_ts) if last_request_ts > 0 else 0.0
         state["last_request_ts"] = now
+        request_gap_client = 0.0
+        gap_source = "none"
+        if self.QF_REQUEST_GAP_USE_CLIENT_TS:
+            req_ts = float(request_ts or 0.0)
+            last_client_request_ts = float(state.get("last_client_request_ts") or 0.0)
+            if req_ts > 0.0 and last_client_request_ts > 0.0 and req_ts > last_client_request_ts:
+                request_gap_client = req_ts - last_client_request_ts
+                gap_source = "client"
+            if req_ts > 0.0:
+                state["last_client_request_ts"] = req_ts
+
+        request_gap_raw = 0.0
+        if request_gap_client > 0.0:
+            request_gap_raw = request_gap_client
+        elif request_gap_server > 0.0:
+            request_gap_raw = request_gap_server
+            gap_source = "server"
+
+        request_gap_smoothed = float(state.get("request_gap_ema") or 0.0)
+        if request_gap_raw > 0.0:
+            alpha = float(self.QF_REQUEST_GAP_EMA_ALPHA)
+            if request_gap_smoothed <= 0.0:
+                request_gap_smoothed = request_gap_raw
+            else:
+                request_gap_smoothed = (alpha * request_gap_raw) + ((1.0 - alpha) * request_gap_smoothed)
+            state["request_gap_ema"] = request_gap_smoothed
+
         state["updated_ts"] = now
         status = str(result.get("status") or "")
         reason = str(result.get("reason") or "")
@@ -602,21 +687,32 @@ class QFBridgeService(xbmc.Monitor):
         source = str(result.get("source") or "")
         meta = result.get("meta") or {}
         effective_hold_seconds = float(self.QF_HOLD_SECONDS)
-        if request_gap > 0.0:
+        if request_gap_smoothed > 0.0:
             # Hold at least one real request gap (+small buffer) to avoid false no_hit between sparse polls.
-            effective_hold_seconds = max(effective_hold_seconds, min(90.0, request_gap + 2.0))
+            effective_hold_seconds = max(
+                effective_hold_seconds,
+                min(float(self.QF_REQUEST_GAP_MAX_SECONDS), request_gap_smoothed + float(self.QF_REQUEST_GAP_BUFFER_SECONDS)),
+            )
 
         def _clear_pending_hit():
             state["pending_hit_key"] = ""
             state["pending_hit_count"] = 0
             state["pending_hit_ts"] = 0.0
 
+        pending_bypassed = False
         if status == "hit" and artist and title:
             has_last_pair_before = bool(state.get("last_artist") and state.get("last_title"))
             stream_pair_state = str(meta.get("stream_pair_state") or "")
             is_feed_hit = str(source).startswith("web_feed_")
             weak_stream_signal = stream_pair_state in {"", "no_candidate", "missing_field"}
-            if self.QF_SERVICE_GUI_PARITY_ENABLED and is_feed_hit and weak_stream_signal and not has_last_pair_before:
+            need_pending_confirmation = bool(self.QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY)
+            if (
+                self.QF_SERVICE_GUI_PARITY_ENABLED
+                and is_feed_hit
+                and weak_stream_signal
+                and not has_last_pair_before
+                and need_pending_confirmation
+            ):
                 pending_key = f"{artist.lower()}|{title.lower()}|{source}"
                 previous_key = str(state.get("pending_hit_key") or "")
                 previous_count = int(state.get("pending_hit_count") or 0)
@@ -648,7 +744,9 @@ class QFBridgeService(xbmc.Monitor):
                         state,
                         last_hit_age="",
                         hold_remaining=0.0,
-                        request_gap=round(request_gap, 3),
+                        request_gap=round(request_gap_raw, 3),
+                        request_gap_smoothed=round(request_gap_smoothed, 3),
+                        gap_source=gap_source,
                         effective_hold_seconds=effective_hold_seconds,
                     )
                     self._prune_station_state()
@@ -656,6 +754,23 @@ class QFBridgeService(xbmc.Monitor):
 
                 _clear_pending_hit()
             else:
+                pending_bypassed = bool(
+                    self.QF_SERVICE_GUI_PARITY_ENABLED
+                    and is_feed_hit
+                    and weak_stream_signal
+                    and not has_last_pair_before
+                    and not need_pending_confirmation
+                )
+                if pending_bypassed:
+                    meta = {**meta, "pending_bypassed": True}
+                    result = {
+                        "status": status,
+                        "artist": artist,
+                        "title": title,
+                        "source": source,
+                        "reason": reason,
+                        "meta": meta,
+                    }
                 _clear_pending_hit()
 
             # GUI-parity guard: if we only keep seeing the same feed pair without stream support,
@@ -713,8 +828,11 @@ class QFBridgeService(xbmc.Monitor):
                 state,
                 last_hit_age=0.0,
                 hold_remaining=round(effective_hold_seconds, 3),
-                request_gap=round(request_gap, 3),
+                request_gap=round(request_gap_raw, 3),
+                request_gap_smoothed=round(request_gap_smoothed, 3),
+                gap_source=gap_source,
                 effective_hold_seconds=effective_hold_seconds,
+                pending_bypassed=pending_bypassed,
             )
             self._prune_station_state()
             return result
@@ -728,7 +846,9 @@ class QFBridgeService(xbmc.Monitor):
                 "passthrough",
                 result,
                 state,
-                request_gap=round(request_gap, 3),
+                request_gap=round(request_gap_raw, 3),
+                request_gap_smoothed=round(request_gap_smoothed, 3),
+                gap_source=gap_source,
                 effective_hold_seconds=effective_hold_seconds,
             )
             self._prune_station_state()
@@ -780,7 +900,9 @@ class QFBridgeService(xbmc.Monitor):
                 state,
                 last_hit_age=round(last_hit_age, 3),
                 hold_remaining=round(hold_remaining, 3),
-                request_gap=round(request_gap, 3),
+                request_gap=round(request_gap_raw, 3),
+                request_gap_smoothed=round(request_gap_smoothed, 3),
+                gap_source=gap_source,
                 effective_hold_seconds=effective_hold_seconds,
             )
             self._prune_station_state()
@@ -807,7 +929,9 @@ class QFBridgeService(xbmc.Monitor):
                 state,
                 last_hit_age=round(last_hit_age, 3) if last_hit_age != float("inf") else "",
                 hold_remaining=0.0,
-                request_gap=round(request_gap, 3),
+                request_gap=round(request_gap_raw, 3),
+                request_gap_smoothed=round(request_gap_smoothed, 3),
+                gap_source=gap_source,
                 effective_hold_seconds=effective_hold_seconds,
                 no_hit_confirmed=no_hit_confirmed,
                 empty_confirmed=empty_confirmed,
@@ -822,7 +946,9 @@ class QFBridgeService(xbmc.Monitor):
             state,
             last_hit_age=round(last_hit_age, 3) if last_hit_age != float("inf") else "",
             hold_remaining=0.0,
-            request_gap=round(request_gap, 3),
+            request_gap=round(request_gap_raw, 3),
+            request_gap_smoothed=round(request_gap_smoothed, 3),
+            gap_source=gap_source,
             effective_hold_seconds=effective_hold_seconds,
         )
         self._prune_station_state()
@@ -1077,6 +1203,62 @@ class QFBridgeService(xbmc.Monitor):
         if not req_id:
             return
 
+        decision_start_ts = time.time()
+        request_finalized = False
+
+        def _decision_latency_seconds():
+            return round(max(0.0, time.time() - decision_start_ts), 3)
+
+        def _finalize_request(status, reason="", artist="", title="", source="", meta=None):
+            nonlocal request_finalized
+            if request_finalized:
+                self.logger.warning(
+                    "request_result_duplicate_finalize",
+                    req_id=req_id,
+                    station=station,
+                    station_id=station_id,
+                    mode=mode,
+                    status=status,
+                    reason=reason,
+                )
+                return
+
+            request_finalized = True
+            decision_latency_s = _decision_latency_seconds()
+            final_meta = dict(meta or {})
+            final_meta["decision_latency_s"] = decision_latency_s
+
+            self.logger.info(
+                "request_result",
+                req_id=req_id,
+                station=station,
+                station_id=station_id,
+                mode=mode,
+                status=status,
+                reason=reason,
+                decision_latency_s=decision_latency_s,
+            )
+            self._write_response(
+                req_id=req_id,
+                status=status,
+                artist=artist,
+                title=title,
+                source=source,
+                reason=reason,
+                meta=final_meta,
+                response_for_req_id=req_id,
+                decision_latency_s=decision_latency_s,
+            )
+
+        self.logger.debug(
+            "request_result_pending",
+            req_id=req_id,
+            station=station,
+            station_id=station_id,
+            mode=mode,
+            status="pending",
+        )
+
         if not self._get_setting_bool("provider_finder_enabled", default=False):
             self.logger.info(
                 "request_blocked",
@@ -1086,8 +1268,7 @@ class QFBridgeService(xbmc.Monitor):
                 mode=mode,
                 reason="qf_disabled",
             )
-            self._write_response(
-                req_id=req_id,
+            _finalize_request(
                 status="blocked",
                 reason="qf_disabled",
                 meta={"mode": mode or "", "request_ts": req_ts or ""},
@@ -1104,8 +1285,7 @@ class QFBridgeService(xbmc.Monitor):
                 reason="import_failed",
                 error=self._import_error,
             )
-            self._write_response(
-                req_id=req_id,
+            _finalize_request(
                 status="error",
                 reason="import_failed",
                 meta={"error": self._import_error},
@@ -1122,8 +1302,7 @@ class QFBridgeService(xbmc.Monitor):
                 mode=mode,
                 reason="missing_station",
             )
-            self._write_response(
-                req_id=req_id,
+            _finalize_request(
                 status="no_hit",
                 reason="missing_station",
                 meta={"mode": mode or "", "request_ts": req_ts or ""},
@@ -1132,23 +1311,14 @@ class QFBridgeService(xbmc.Monitor):
 
         try:
             result = self._resolve_song(station_name, station_id=station_id)
-            result = self._apply_qf_parity_policy(station_key, result)
-            self.logger.info(
-                "request_result",
-                req_id=req_id,
-                station=station,
-                station_id=station_id,
-                mode=mode,
+            request_ts_parsed = self._parse_request_ts(req_ts)
+            result = self._apply_qf_parity_policy(station_key, result, request_ts=request_ts_parsed)
+            _finalize_request(
                 status=result.get("status") or "error",
                 reason=result.get("reason") or "",
-            )
-            self._write_response(
-                req_id=req_id,
-                status=result.get("status") or "error",
                 artist=result.get("artist") or "",
                 title=result.get("title") or "",
                 source=result.get("source") or "",
-                reason=result.get("reason") or "",
                 meta=result.get("meta") or {},
             )
         except Exception as err:
@@ -1163,8 +1333,7 @@ class QFBridgeService(xbmc.Monitor):
                 status=status,
                 error=message,
             )
-            self._write_response(
-                req_id=req_id,
+            _finalize_request(
                 status=status,
                 reason="resolver_exception",
                 meta={"error": message},
