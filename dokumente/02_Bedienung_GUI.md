@@ -64,6 +64,7 @@ Parity-Hinweise (Kodi-Bridge):
 - `hold_seconds` ist in QF gedeckelt (`QF_HOLD_SECONDS_MAX`, aktuell 3.0s).
 - Feed-only-Stale-Drops greifen erst nach `QF_STALE_FEED_DROP_SECONDS` (aktuell konservativ 180s),
   um kurzes `hit/no_hit`-Flackern zu vermeiden.
+- Fuer Skin-Labels kann `RadioMonitor.QF.Response.StationUsed` genutzt werden (tatsaechlich verwendeter Sender in ASM-QF).
 
 ## Quell-Details-Fenster: Sektionen
 

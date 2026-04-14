@@ -28,6 +28,7 @@ RES_REASON = "RadioMonitor.QF.Response.Reason"
 RES_META = "RadioMonitor.QF.Response.Meta"
 RES_TS = "RadioMonitor.QF.Response.Ts"
 RES_FOR_REQ_ID = "RadioMonitor.QF.Response.ForReqId"
+RES_STATION_USED = "RadioMonitor.QF.Response.StationUsed"
 
 QF_ADDON_ID = "service.audio.stream.monitor.qf"
 QF_VERIFIED_SOURCE_KIND = "qf_verified"
@@ -298,6 +299,7 @@ class QFBridgeService(xbmc.Monitor):
         self._set_property(RES_META, "")
         self._set_property(RES_TS, "")
         self._set_property(RES_FOR_REQ_ID, "")
+        self._set_property(RES_STATION_USED, "")
 
     def _write_response(
         self,
@@ -307,6 +309,7 @@ class QFBridgeService(xbmc.Monitor):
         title="",
         source="",
         reason="",
+        station_used="",
         meta=None,
         response_for_req_id="",
         decision_latency_s=None,
@@ -318,6 +321,7 @@ class QFBridgeService(xbmc.Monitor):
         self._set_property(RES_TITLE, title)
         self._set_property(RES_SOURCE, source)
         self._set_property(RES_REASON, reason)
+        self._set_property(RES_STATION_USED, station_used)
         if meta:
             self._set_property(RES_META, json.dumps(meta, ensure_ascii=False))
         else:
@@ -1697,6 +1701,7 @@ class QFBridgeService(xbmc.Monitor):
             decision_latency_s = _decision_latency_seconds()
             final_meta = dict(meta or {})
             final_meta["decision_latency_s"] = decision_latency_s
+            station_used_value = self._sanitize_station_text(final_meta.get("station") or "")
 
             self.logger.info(
                 "request_result",
@@ -1715,6 +1720,7 @@ class QFBridgeService(xbmc.Monitor):
                 title=title,
                 source=source,
                 reason=reason,
+                station_used=station_used_value,
                 meta=final_meta,
                 response_for_req_id=req_id,
                 decision_latency_s=decision_latency_s,
@@ -1728,6 +1734,7 @@ class QFBridgeService(xbmc.Monitor):
             mode=mode,
             status="pending",
         )
+        self._set_property(RES_STATION_USED, "")
 
         if not self._get_setting_bool("provider_finder_enabled", default=False):
             self.logger.info(

@@ -261,6 +261,7 @@ Response-Felder (`ASM-QF` -> `ASM`):
 - `RadioMonitor.QF.Response.Meta`
 - `RadioMonitor.QF.Response.Ts`
 - `RadioMonitor.QF.Response.ForReqId`
+- `RadioMonitor.QF.Response.StationUsed`
 
 ### Verbindliche Regel
 
