@@ -267,6 +267,9 @@ Semantik `StationUsed`:
 
 - wird im Finalize aus `response.meta.station` abgeleitet (sanitisiert)
 - bildet den in QF effektiv verwendeten Sender fuer Lookup/Resolve ab
+- wird bei `request_result_pending` nicht aktiv geleert
+- bleibt zwischen Requests auf dem letzten terminalen Wert stabil
+- wird mit der naechsten terminalen Response aktualisiert (`hit|no_hit|blocked|aborted|error|timeout`)
 - kann bei Fehler-/Blocked-/Abbruchpfaden leer sein
 
 ### Verbindliche Regel

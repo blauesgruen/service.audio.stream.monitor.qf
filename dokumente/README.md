@@ -16,6 +16,7 @@ Hinweis:
 
 - Der Kodi-Bridge-Contract (`ASM <-> ASM-QF`, inkl. Pflicht-Response auch bei `aborted/superseded`) ist in `06_Entwicklerdokumentation.md` dokumentiert.
 - Das Runtime-Label-Property `RadioMonitor.QF.Response.StationUsed` (effektiv verwendeter Sender) ist dort ebenfalls beschrieben.
+  - Verhalten: bleibt waehrend `pending` auf dem letzten terminalen Wert und wird erst bei terminaler Response aktualisiert.
 - Die aktuellen Parity-Stabilitaetsregeln (`QF_HOLD_SECONDS_MAX`, `QF_STALE_FEED_DROP_SECONDS`) sind in `04_...`, `05_...` und `06_...` beschrieben.
 
 ## Schnellstart

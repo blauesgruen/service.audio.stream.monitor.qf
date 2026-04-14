@@ -85,6 +85,7 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 2. `ASM-QF` liest Request, verarbeitet Lookup/Resolve/ICY/Discovery.
 3. Ergebnis wird als Response (`RadioMonitor.QF.Response.*`) geschrieben.
    - inkl. `RadioMonitor.QF.Response.StationUsed` (effektiv verwendeter Sender in QF)
+   - `StationUsed` bleibt waehrend `pending` auf dem letzten terminalen Wert und wird bei terminaler Response aktualisiert
 4. Auch bei ueberholtem Request (superseded) schreibt `ASM-QF` eine Response mit `status=aborted`.
 
 ### Aktuelle Laufketten in `ASM-QF`

@@ -27,6 +27,8 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Speicherung verifizierter Quellen in SQLite (`radio_sources.db`)
 - Kodi-Bridge-Contract (`ASM <-> ASM-QF`): pro angenommenem Request genau eine Response (inkl. `aborted` bei superseded)
 - Kodi-Label-Property `RadioMonitor.QF.Response.StationUsed` zeigt den tatsaechlich in ASM-QF verwendeten Sender
+  - bleibt waehrend `pending` stabil auf dem letzten terminalen Wert
+  - wird mit der naechsten terminalen Response aktualisiert (`hit|no_hit|blocked|aborted|error|timeout`)
 - Verified-Source-Fastpath prueft Quellen typgerecht (Stream via ICY, Feed via Feed-Probe)
 - QF-Parity mit begrenztem Hold (`QF_HOLD_SECONDS_MAX`) fuer stabile, aber schnelle Song-Ende-Erkennung
 - Konservatives Feed-Stale-Drop-Fenster (`QF_STALE_FEED_DROP_SECONDS`) gegen `hit/no_hit`-Flackern
