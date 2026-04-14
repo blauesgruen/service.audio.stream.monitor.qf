@@ -65,6 +65,7 @@ Parity-Hinweise (Kodi-Bridge):
 - Feed-only-Stale-Drops greifen erst nach `QF_STALE_FEED_DROP_SECONDS` (aktuell konservativ 180s),
   um kurzes `hit/no_hit`-Flackern zu vermeiden.
 - Fuer Skin-Labels kann `RadioMonitor.QF.Response.StationUsed` genutzt werden (tatsaechlich verwendeter Sender in ASM-QF).
+  - Hinweis: waehrend `pending` und in bestimmten Fehlerpfaden kann das Feld leer sein.
 
 ## Quell-Details-Fenster: Sektionen
 

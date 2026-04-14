@@ -263,6 +263,12 @@ Response-Felder (`ASM-QF` -> `ASM`):
 - `RadioMonitor.QF.Response.ForReqId`
 - `RadioMonitor.QF.Response.StationUsed`
 
+Semantik `StationUsed`:
+
+- wird im Finalize aus `response.meta.station` abgeleitet (sanitisiert)
+- bildet den in QF effektiv verwendeten Sender fuer Lookup/Resolve ab
+- kann bei Fehler-/Blocked-/Abbruchpfaden leer sein
+
 ### Verbindliche Regel
 
 - Fuer jeden in `ASM-QF` angenommenen Request wird genau eine Response geschrieben.
