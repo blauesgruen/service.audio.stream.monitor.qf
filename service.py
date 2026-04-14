@@ -112,9 +112,14 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_TELEMETRY_ENABLED = True
         self.QF_FASTPATH_VERIFIED_SOURCE_ENABLED = True
         self.QF_VERIFIED_SOURCE_MAX_AGE_SECONDS = 43200
+        self.QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED = True
+        self.QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS = 1.2
         self.QF_PHASE_TIMING_PRECISION = 3
         self.QF_RESULT_CACHE_ENABLED = True
         self.QF_RESULT_CACHE_TTL_SECONDS = 12
+        self.QF_STATION_KEY_NAME_FALLBACK_ENABLED = True
+        self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS = 2
+        self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES = 6
         self.QF_DISCOVERY_QUICKPASS_ENABLED = True
         self.QF_DISCOVERY_QUICKPASS_MAX_CANDIDATES = 3
         self.QF_DISCOVERY_QUICKPASS_MAX_SECONDS = 1.2
@@ -186,6 +191,9 @@ class QFBridgeService(xbmc.Monitor):
                 QF_PHASE_TIMING_PRECISION,
                 QF_RESULT_CACHE_ENABLED,
                 QF_RESULT_CACHE_TTL_SECONDS,
+                QF_STATION_KEY_NAME_FALLBACK_ENABLED,
+                QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS,
+                QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES,
                 QF_REQUEST_GAP_BUFFER_SECONDS,
                 QF_REQUEST_GAP_EMA_ALPHA,
                 QF_REQUEST_GAP_MAX_SECONDS,
@@ -195,6 +203,8 @@ class QFBridgeService(xbmc.Monitor):
                 QF_TELEMETRY_ENABLED,
                 QF_FASTPATH_VERIFIED_SOURCE_ENABLED,
                 QF_VERIFIED_SOURCE_MAX_AGE_SECONDS,
+                QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED,
+                QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS,
             )
             from app.metadata import SongMetadataFetcher
             from app.now_playing_discovery import NowPlayingDiscoveryService
@@ -233,9 +243,14 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_TELEMETRY_ENABLED = bool(QF_TELEMETRY_ENABLED)
         self.QF_FASTPATH_VERIFIED_SOURCE_ENABLED = bool(QF_FASTPATH_VERIFIED_SOURCE_ENABLED)
         self.QF_VERIFIED_SOURCE_MAX_AGE_SECONDS = max(0, int(QF_VERIFIED_SOURCE_MAX_AGE_SECONDS))
+        self.QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED = bool(QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED)
+        self.QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS = max(0.1, float(QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS))
         self.QF_PHASE_TIMING_PRECISION = max(1, int(QF_PHASE_TIMING_PRECISION))
         self.QF_RESULT_CACHE_ENABLED = bool(QF_RESULT_CACHE_ENABLED)
         self.QF_RESULT_CACHE_TTL_SECONDS = max(0, int(QF_RESULT_CACHE_TTL_SECONDS))
+        self.QF_STATION_KEY_NAME_FALLBACK_ENABLED = bool(QF_STATION_KEY_NAME_FALLBACK_ENABLED)
+        self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS = max(1, int(QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS))
+        self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES = max(1, int(QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES))
         self.QF_DISCOVERY_QUICKPASS_ENABLED = bool(QF_DISCOVERY_QUICKPASS_ENABLED)
         self.QF_DISCOVERY_QUICKPASS_MAX_CANDIDATES = max(1, int(QF_DISCOVERY_QUICKPASS_MAX_CANDIDATES))
         self.QF_DISCOVERY_QUICKPASS_MAX_SECONDS = max(0.1, float(QF_DISCOVERY_QUICKPASS_MAX_SECONDS))
@@ -457,6 +472,59 @@ class QFBridgeService(xbmc.Monitor):
             value /= 1000.0
         return value
 
+    def _is_request_superseded(self, req_id, station_key):
+        current_req_id = (WINDOW.getProperty(REQ_ID) or "").strip()
+        if not current_req_id or current_req_id == str(req_id or "").strip():
+            return False, "", ""
+
+        station = WINDOW.getProperty(REQ_STATION) or ""
+        station_id = WINDOW.getProperty(REQ_STATION_ID) or ""
+        current_station_key = self._build_station_key(station, station_id=station_id)
+        if not station_key or not current_station_key:
+            return False, "", ""
+        if not self._are_station_keys_compatible(station_key, current_station_key):
+            return False, "", ""
+        return True, current_req_id, current_station_key
+
+    def _name_key_value(self, station_key):
+        key = str(station_key or "").strip().lower()
+        if not key.startswith("name:"):
+            return ""
+        return key[len("name:") :].strip()
+
+    def _are_station_keys_compatible(self, left_key, right_key):
+        left = str(left_key or "").strip().lower()
+        right = str(right_key or "").strip().lower()
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+        if not self.QF_STATION_KEY_NAME_FALLBACK_ENABLED:
+            return False
+        left_name = self._name_key_value(left)
+        right_name = self._name_key_value(right)
+        if not left_name or not right_name:
+            return False
+        left_tokens = [token for token in left_name.split() if token]
+        right_tokens = [token for token in right_name.split() if token]
+        min_tokens = int(self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS)
+        if len(left_tokens) < min_tokens or len(right_tokens) < min_tokens:
+            return False
+        return left_name.startswith(right_name + " ") or right_name.startswith(left_name + " ")
+
+    def _pick_compatible_station_key(self, station_key, keys, ts_getter):
+        if not self.QF_STATION_KEY_NAME_FALLBACK_ENABLED:
+            return ""
+        compatible = []
+        for key in keys:
+            if not self._are_station_keys_compatible(station_key, key):
+                continue
+            compatible.append(key)
+        if not compatible:
+            return ""
+        compatible.sort(key=lambda key: float(ts_getter(key) or 0.0), reverse=True)
+        return compatible[0]
+
     def _build_resolution_cache_key(self, station_input, station_id=""):
         station_id_norm = self._normalize_station_id(station_id)
         if station_id_norm:
@@ -468,10 +536,85 @@ class QFBridgeService(xbmc.Monitor):
             return f"url:{self._normalize_url(text)}"
         return f"name:{self._normalize_station_name(text)}"
 
+    def _classify_verified_source_fastpath_kind(self, source_url, meta=None):
+        url = str(source_url or "").strip().lower()
+        meta_obj = meta if isinstance(meta, dict) else {}
+        raw_kind = str(meta_obj.get("source_kind_raw") or "").strip().lower()
+        source_kind = str(meta_obj.get("source_kind") or "").strip().lower()
+        hint = raw_kind or source_kind
+
+        if hint.startswith("web_feed_"):
+            return "feed"
+        if hint.startswith("stream") or hint == "icy":
+            return "stream"
+        if any(token in url for token in ("nowplaying", "now-playing", "playlist", "currentsong", "status-json.xsl", ".json", ".xml", ".jsp", ".html")):
+            return "feed"
+        return "stream"
+
+    def _probe_verified_source_fastpath(
+        self,
+        *,
+        source_url,
+        source_kind,
+        station_name_hint,
+        station_id_value,
+        station_id_norm,
+        fetcher,
+        discovery,
+    ):
+        if source_kind == "feed":
+            if not self.QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED:
+                return None, "feed_disabled"
+            song = discovery.fetch_now_playing(
+                [source_url],
+                station_name=station_name_hint,
+                max_candidates=1,
+                max_elapsed_seconds=self.QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS,
+            )
+            if not song:
+                return None, "feed_empty"
+            a, t, pair_state = self.prefilter_pair(
+                song.artist,
+                song.title,
+                source="asm-qf",
+                station_name=station_name_hint,
+                invalid_values=["Unknown", "Radio Stream", "Internet Radio", "", station_name_hint],
+                station_hint_values=[station_name_hint, station_id_value, station_id_norm],
+            )
+            if pair_state != "ok":
+                return None, f"feed_rejected_{pair_state}"
+            song.artist = a
+            song.title = t
+            return song, "ok"
+
+        song = fetcher.fetch(source_url)
+        a, t, pair_state = self.prefilter_pair(
+            song.artist,
+            song.title,
+            source="asm-qf",
+            station_name=station_name_hint,
+            invalid_values=["Unknown", "Radio Stream", "Internet Radio", "", station_name_hint],
+            station_hint_values=[station_name_hint, station_id_value, station_id_norm],
+        )
+        if pair_state != "ok":
+            return None, f"stream_rejected_{pair_state}"
+        song.artist = a
+        song.title = t
+        return song, "ok"
+
     def _get_cached_resolution(self, cache_key):
         if not cache_key:
             return None
         item = self._resolution_cache.get(cache_key)
+        if not item:
+            fallback_key = self._pick_compatible_station_key(
+                cache_key,
+                self._resolution_cache.keys(),
+                lambda key: float((self._resolution_cache.get(key) or {}).get("ts") or 0.0),
+            )
+            if fallback_key:
+                item = self._resolution_cache.get(fallback_key)
+                self.logger.debug("resolution_cache_name_fallback_hit", cache_key=cache_key, fallback_key=fallback_key)
         if not item:
             return None
         age = time.time() - float(item.get("ts") or 0.0)
@@ -546,6 +689,15 @@ class QFBridgeService(xbmc.Monitor):
             return None
         item = self._result_cache.get(key)
         if not item:
+            fallback_key = self._pick_compatible_station_key(
+                key,
+                self._result_cache.keys(),
+                lambda candidate_key: float((self._result_cache.get(candidate_key) or {}).get("ts") or 0.0),
+            )
+            if fallback_key:
+                item = self._result_cache.get(fallback_key)
+                self.logger.debug("result_cache_name_fallback_hit", station_key=key, fallback_key=fallback_key)
+        if not item:
             return None
         age = time.time() - float(item.get("ts") or 0.0)
         if age > float(self.QF_RESULT_CACHE_TTL_SECONDS):
@@ -579,6 +731,11 @@ class QFBridgeService(xbmc.Monitor):
         if not key:
             return
         self._result_cache.pop(key, None)
+        if not self.QF_STATION_KEY_NAME_FALLBACK_ENABLED:
+            return
+        for candidate_key in list(self._result_cache.keys()):
+            if self._are_station_keys_compatible(key, candidate_key):
+                self._result_cache.pop(candidate_key, None)
 
     def _ensure_verified_sources_schema(self, conn):
         conn.execute(
@@ -1077,7 +1234,7 @@ class QFBridgeService(xbmc.Monitor):
         self._prune_station_state()
         return result
 
-    def _resolve_song(self, station_input, station_id="", station_key=""):
+    def _resolve_song(self, station_input, station_id="", station_key="", supersede_check=None):
         lookup, resolver, fetcher, discovery = self._get_core_services()
 
         phase_timings = {}
@@ -1101,6 +1258,25 @@ class QFBridgeService(xbmc.Monitor):
                 merged["verified_fastpath_state"] = verified_fastpath_state
             return merged
 
+        def _abort_result(phase):
+            return {
+                "status": "aborted",
+                "artist": "",
+                "title": "",
+                "source": "",
+                "reason": "request_superseded",
+                "meta": _attach_phase_meta({"abort_phase": phase}),
+            }
+
+        def _check_superseded(phase):
+            if supersede_check and supersede_check(phase):
+                return _abort_result(phase)
+            return None
+
+        superseded = _check_superseded("resolve_start")
+        if superseded:
+            return superseded
+
         station = None
         stream_seed = station_input
         station_id_norm = self._normalize_station_id(station_id)
@@ -1117,6 +1293,9 @@ class QFBridgeService(xbmc.Monitor):
                 candidate = source_repo.get_preferred_source(
                     station_key,
                     max_age_seconds=int(self.QF_VERIFIED_SOURCE_MAX_AGE_SECONDS),
+                    allow_name_fallback=bool(self.QF_STATION_KEY_NAME_FALLBACK_ENABLED),
+                    min_name_tokens=int(self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS),
+                    max_name_candidates=int(self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES),
                 )
                 if candidate:
                     verified_source_url = str(candidate.get("source_url") or "").strip()
@@ -1124,49 +1303,60 @@ class QFBridgeService(xbmc.Monitor):
                         verified_fastpath_state = "candidate"
                         probe_started = time.time()
                         fast_song = None
+                        candidate_meta = candidate.get("meta") if isinstance(candidate, dict) else {}
+                        candidate_kind = self._classify_verified_source_fastpath_kind(
+                            verified_source_url,
+                            meta=candidate_meta,
+                        )
                         try:
-                            fast_song = fetcher.fetch(verified_source_url)
-                            verified_fastpath_state = "probe_ok"
+                            fast_song, probe_state = self._probe_verified_source_fastpath(
+                                source_url=verified_source_url,
+                                source_kind=candidate_kind,
+                                station_name_hint=station_name_hint,
+                                station_id_value=station_id_value,
+                                station_id_norm=station_id_norm,
+                                fetcher=fetcher,
+                                discovery=discovery,
+                            )
+                            verified_fastpath_state = f"probe_{candidate_kind}_{probe_state}"
+                            if probe_state == "ok":
+                                verified_fastpath_state = f"probe_{candidate_kind}_ok"
                         except Exception as err:
-                            verified_fastpath_state = "probe_error"
+                            verified_fastpath_state = f"probe_{candidate_kind}_error"
                             self.logger.debug(
                                 "verified_source_fastpath_probe_failed",
                                 station_key=station_key,
                                 source_url=verified_source_url,
+                                source_kind=candidate_kind,
                                 error=str(err),
                             )
                         _mark_phase("verified_source_probe", probe_started)
 
                         if fast_song:
-                            a, t, pair_state = self.prefilter_pair(
-                                fast_song.artist,
-                                fast_song.title,
-                                source="asm-qf",
-                                station_name=station_name_hint,
-                                invalid_values=["Unknown", "Radio Stream", "Internet Radio", "", station_name_hint],
-                                station_hint_values=[station_name_hint, station_id_value, station_id_norm],
-                            )
-                            if pair_state == "ok":
-                                verified_fastpath_state = "hit"
-                                _mark_phase("verified_source_lookup", fastpath_started)
-                                return {
-                                    "status": "hit",
-                                    "artist": a,
-                                    "title": t,
-                                    "source": fast_song.source_kind,
-                                    "reason": "verified_source_fastpath",
-                                    "meta": _attach_phase_meta(
-                                        {
-                                            "station": station_name_hint,
-                                            "source_approval": "verified_source_cache",
-                                            "source_url": fast_song.source_url or verified_source_url,
-                                            "resolved_url": "",
-                                            "delivery_url": "",
-                                        }
-                                    ),
-                                }
-                            verified_fastpath_state = f"rejected_{pair_state}"
+                            verified_fastpath_state = f"hit_{candidate_kind}"
+                            _mark_phase("verified_source_lookup", fastpath_started)
+                            return {
+                                "status": "hit",
+                                "artist": fast_song.artist,
+                                "title": fast_song.title,
+                                "source": fast_song.source_kind,
+                                "reason": "verified_source_fastpath",
+                                "meta": _attach_phase_meta(
+                                    {
+                                        "station": station_name_hint,
+                                        "source_approval": "verified_source_cache",
+                                        "source_url": fast_song.source_url or verified_source_url,
+                                        "resolved_url": "",
+                                        "delivery_url": "",
+                                        "verified_source_kind": candidate_kind,
+                                    }
+                                ),
+                            }
         _mark_phase("verified_source_lookup", fastpath_started)
+
+        superseded = _check_superseded("after_verified_source_lookup")
+        if superseded:
+            return superseded
 
         resolution_started = time.time()
         cache_key = self._build_resolution_cache_key(station_input, station_id=station_id)
@@ -1207,6 +1397,10 @@ class QFBridgeService(xbmc.Monitor):
             self._store_cached_resolution(cache_key, station, resolved, origin_domains)
         _mark_phase("resolution", resolution_started)
 
+        superseded = _check_superseded("after_resolution")
+        if superseded:
+            return superseded
+
         def classify_source(url):
             if not url:
                 return False, ""
@@ -1236,6 +1430,10 @@ class QFBridgeService(xbmc.Monitor):
         except Exception as err:
             stream_error = str(err)
         _mark_phase("stream_probe", stream_probe_started)
+
+        superseded = _check_superseded("after_stream_probe")
+        if superseded:
+            return superseded
 
         station_name = station.name if station else station_input
         station_slug = ""
@@ -1301,6 +1499,9 @@ class QFBridgeService(xbmc.Monitor):
 
         if feed_pair_state != "ok":
             for attempt in range(1, feed_retry_attempts + 1):
+                superseded = _check_superseded(f"discovery_retry_{attempt}_start")
+                if superseded:
+                    return superseded
                 feed_song = discovery.fetch_now_playing(probe_candidates, station_name=station_name)
                 if not feed_song:
                     feed_pair_state = "missing_field"
@@ -1309,8 +1510,15 @@ class QFBridgeService(xbmc.Monitor):
                     if feed_pair_state == "ok":
                         break
                 if attempt < feed_retry_attempts:
+                    superseded = _check_superseded(f"discovery_retry_{attempt}_sleep")
+                    if superseded:
+                        return superseded
                     time.sleep(feed_retry_delay_seconds)
         _mark_phase("discovery", discovery_started)
+
+        superseded = _check_superseded("after_discovery")
+        if superseded:
+            return superseded
 
         if feed_song and feed_pair_state == "ok":
             allowed, approval = classify_source(feed_song.source_url)
@@ -1539,6 +1747,45 @@ class QFBridgeService(xbmc.Monitor):
 
         station_name = (station or "").strip()
         station_key = self._build_station_key(station_name, station_id=station_id)
+
+        def _get_supersede_meta(phase):
+            superseded, newer_req_id, newer_station_key = self._is_request_superseded(req_id, station_key)
+            if not superseded:
+                return None
+            self.logger.info(
+                "request_superseded_abort",
+                req_id=req_id,
+                station=station,
+                station_id=station_id,
+                mode=mode,
+                phase=phase,
+                newer_req_id=newer_req_id,
+                station_key=station_key,
+                newer_station_key=newer_station_key,
+            )
+            return {
+                "abort_phase": phase,
+                "newer_req_id": newer_req_id,
+                "station_key": station_key,
+                "newer_station_key": newer_station_key,
+            }
+
+        def _finalize_superseded(phase, extra_meta=None):
+            supersede_meta = _get_supersede_meta(phase)
+            if not supersede_meta:
+                return False
+            merged_meta = dict(extra_meta or {})
+            merged_meta.update(supersede_meta)
+            _finalize_request(
+                status="aborted",
+                reason="request_superseded",
+                meta=merged_meta,
+            )
+            return True
+
+        if _finalize_superseded("before_resolve"):
+            return
+
         if not station_name and not (station_id or "").strip():
             self.logger.info(
                 "request_nohit",
@@ -1569,9 +1816,33 @@ class QFBridgeService(xbmc.Monitor):
                 }
                 self.logger.debug("result_cache_hit", station_key=station_key)
             else:
-                result = self._resolve_song(station_name, station_id=station_id, station_key=station_key)
+                result = self._resolve_song(
+                    station_name,
+                    station_id=station_id,
+                    station_key=station_key,
+                    supersede_check=lambda phase: bool(_get_supersede_meta(phase)),
+                )
+
+            if _finalize_superseded("after_resolve"):
+                return
+
+            if (result.get("reason") or "") == "request_superseded":
+                result_meta = dict(result.get("meta") or {})
+                phase = str(result_meta.get("abort_phase") or "resolve")
+                result_meta.setdefault("abort_phase", phase)
+                _finalize_request(
+                    status="aborted",
+                    reason="request_superseded",
+                    meta=result_meta,
+                )
+                return
+
             request_ts_parsed = self._parse_request_ts(req_ts)
             result = self._apply_qf_parity_policy(station_key, result, request_ts=request_ts_parsed)
+
+            if _finalize_superseded("before_finalize"):
+                return
+
             if (result.get("status") or "") == "hit":
                 self._store_cached_result(station_key, result)
             else:

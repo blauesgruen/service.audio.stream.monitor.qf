@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import json
 from typing import Callable
 
 
@@ -23,12 +24,21 @@ class VerifiedSourceRepository:
             return
         self._log(event, detail)
 
-    def get_preferred_source(self, station_key: str, max_age_seconds: int = 0) -> dict | None:
+    def get_preferred_source(
+        self,
+        station_key: str,
+        max_age_seconds: int = 0,
+        *,
+        allow_name_fallback: bool = False,
+        min_name_tokens: int = 2,
+        max_name_candidates: int = 6,
+    ) -> dict | None:
         key = str(station_key or "").strip()
         if not key or not self._db_path:
             return None
 
         now_ts = int(time.time())
+        row = None
         try:
             conn = sqlite3.connect(self._db_path, timeout=1.0)
             try:
@@ -42,6 +52,13 @@ class VerifiedSourceRepository:
                     """,
                     (key,),
                 ).fetchone()
+                if not row and allow_name_fallback:
+                    row = self._lookup_name_fallback(
+                        conn=conn,
+                        station_key=key,
+                        min_name_tokens=min_name_tokens,
+                        max_name_candidates=max_name_candidates,
+                    )
             finally:
                 conn.close()
         except Exception as err:
@@ -72,5 +89,58 @@ class VerifiedSourceRepository:
             "last_seen_ts": last_seen_ts,
             "verified_at_utc": str(row[4] or ""),
             "meta_json": str(row[5] or ""),
+            "meta": self._parse_meta_json(row[5]),
         }
+
+    def _extract_name_key_tokens(self, station_key: str) -> list[str]:
+        key = str(station_key or "").strip().lower()
+        if not key.startswith("name:"):
+            return []
+        value = key[len("name:") :].strip()
+        if not value:
+            return []
+        return [token for token in value.split() if token]
+
+    def _lookup_name_fallback(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        station_key: str,
+        min_name_tokens: int,
+        max_name_candidates: int,
+    ):
+        tokens = self._extract_name_key_tokens(station_key)
+        if len(tokens) < max(1, int(min_name_tokens or 1)):
+            return None
+
+        # Strict compatibility: key-prefix match in both directions.
+        like_prefix = f"{station_key} %"
+        rows = conn.execute(
+            """
+            SELECT source_url, source_url_norm, confidence, last_seen_ts, verified_at_utc, meta_json
+            FROM verified_station_sources
+            WHERE station_key LIKE ? OR ? LIKE station_key || ' %'
+            ORDER BY last_seen_ts DESC, confidence DESC
+            LIMIT ?
+            """,
+            (like_prefix, station_key, max(1, int(max_name_candidates or 1))),
+        ).fetchall()
+        if not rows:
+            self._trace("verified_source_lookup_name_fallback_miss", station_key)
+            return None
+        self._trace("verified_source_lookup_name_fallback_hit", station_key)
+        return rows[0]
+
+    def _parse_meta_json(self, raw_value: str) -> dict:
+        text = str(raw_value or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            self._trace("verified_source_meta_parse_failed", text[:120])
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
 
