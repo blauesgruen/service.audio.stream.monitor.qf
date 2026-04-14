@@ -268,6 +268,12 @@ Response-Felder (`ASM-QF` -> `ASM`):
 - Das gilt auch fuer Abbruchpfade wie `request_superseded` (Status `aborted`).
 - Keine stillen Returns ohne Response-Write nach `request_received`.
 
+Supersede-Policy:
+
+- Default ist Preflight-Supersede (vor Start der Bearbeitung).
+- Midflight-Supersede ist optional und standardmaessig deaktiviert.
+- Schalter: `QF_SUPERSEDE_PREEMPT_ENABLED`, `QF_SUPERSEDE_MIDFLIGHT_ENABLED`.
+
 ### Erwartete Statuswerte
 
 - `hit`

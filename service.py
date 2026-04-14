@@ -99,8 +99,10 @@ class QFBridgeService(xbmc.Monitor):
         self._qf_station_state: dict[str, dict] = {}
         self.QF_SERVICE_GUI_PARITY_ENABLED = False
         self.QF_HOLD_SECONDS = 0.0
+        self.QF_HOLD_SECONDS_MAX = 3.0
         self.QF_NO_HIT_CONFIRM = 1
         self.QF_EMPTY_CONFIRM = 1
+        self.QF_STALE_FEED_DROP_SECONDS = 180.0
         self.QF_FEED_RETRY_ATTEMPTS = 3
         self.QF_FEED_RETRY_DELAY_SECONDS = 0.35
         self.QF_STATE_MAX_STATIONS = 64
@@ -120,6 +122,8 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_STATION_KEY_NAME_FALLBACK_ENABLED = True
         self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS = 2
         self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES = 6
+        self.QF_SUPERSEDE_PREEMPT_ENABLED = True
+        self.QF_SUPERSEDE_MIDFLIGHT_ENABLED = False
         self.QF_DISCOVERY_QUICKPASS_ENABLED = True
         self.QF_DISCOVERY_QUICKPASS_MAX_CANDIDATES = 3
         self.QF_DISCOVERY_QUICKPASS_MAX_SECONDS = 1.2
@@ -186,14 +190,18 @@ class QFBridgeService(xbmc.Monitor):
                 QF_FEED_RETRY_SHORT_GAP_SECONDS,
                 QF_FEED_RETRY_LONG_GAP_SECONDS,
                 QF_HOLD_SECONDS,
+                QF_HOLD_SECONDS_MAX,
                 QF_NO_HIT_CONFIRM,
                 QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY,
                 QF_PHASE_TIMING_PRECISION,
                 QF_RESULT_CACHE_ENABLED,
                 QF_RESULT_CACHE_TTL_SECONDS,
+                QF_STALE_FEED_DROP_SECONDS,
                 QF_STATION_KEY_NAME_FALLBACK_ENABLED,
                 QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS,
                 QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES,
+                QF_SUPERSEDE_PREEMPT_ENABLED,
+                QF_SUPERSEDE_MIDFLIGHT_ENABLED,
                 QF_REQUEST_GAP_BUFFER_SECONDS,
                 QF_REQUEST_GAP_EMA_ALPHA,
                 QF_REQUEST_GAP_MAX_SECONDS,
@@ -229,9 +237,11 @@ class QFBridgeService(xbmc.Monitor):
         self.ALLOW_OFFICIAL_CHAIN_SOURCES = ALLOW_OFFICIAL_CHAIN_SOURCES
         self.ORIGIN_ONLY_MODE = ORIGIN_ONLY_MODE
         self.QF_SERVICE_GUI_PARITY_ENABLED = bool(QF_SERVICE_GUI_PARITY_ENABLED)
-        self.QF_HOLD_SECONDS = max(0.0, float(QF_HOLD_SECONDS))
+        self.QF_HOLD_SECONDS_MAX = max(0.0, float(QF_HOLD_SECONDS_MAX))
+        self.QF_HOLD_SECONDS = min(max(0.0, float(QF_HOLD_SECONDS)), self.QF_HOLD_SECONDS_MAX)
         self.QF_NO_HIT_CONFIRM = max(1, int(QF_NO_HIT_CONFIRM))
         self.QF_EMPTY_CONFIRM = max(1, int(QF_EMPTY_CONFIRM))
+        self.QF_STALE_FEED_DROP_SECONDS = max(10.0, float(QF_STALE_FEED_DROP_SECONDS))
         self.QF_FEED_RETRY_ATTEMPTS = max(1, int(QF_FEED_RETRY_ATTEMPTS))
         self.QF_FEED_RETRY_DELAY_SECONDS = max(0.0, float(QF_FEED_RETRY_DELAY_SECONDS))
         self.QF_STATE_MAX_STATIONS = max(16, int(QF_STATE_MAX_STATIONS))
@@ -251,6 +261,8 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_STATION_KEY_NAME_FALLBACK_ENABLED = bool(QF_STATION_KEY_NAME_FALLBACK_ENABLED)
         self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS = max(1, int(QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS))
         self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES = max(1, int(QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES))
+        self.QF_SUPERSEDE_PREEMPT_ENABLED = bool(QF_SUPERSEDE_PREEMPT_ENABLED)
+        self.QF_SUPERSEDE_MIDFLIGHT_ENABLED = bool(QF_SUPERSEDE_MIDFLIGHT_ENABLED)
         self.QF_DISCOVERY_QUICKPASS_ENABLED = bool(QF_DISCOVERY_QUICKPASS_ENABLED)
         self.QF_DISCOVERY_QUICKPASS_MAX_CANDIDATES = max(1, int(QF_DISCOVERY_QUICKPASS_MAX_CANDIDATES))
         self.QF_DISCOVERY_QUICKPASS_MAX_SECONDS = max(0.1, float(QF_DISCOVERY_QUICKPASS_MAX_SECONDS))
@@ -301,7 +313,6 @@ class QFBridgeService(xbmc.Monitor):
     ):
         response_for_req_id = str(response_for_req_id or req_id or "").strip()
         response_ts = int(time.time())
-        self._clear_response()
         self._set_property(RES_STATUS, status)
         self._set_property(RES_ARTIST, artist)
         self._set_property(RES_TITLE, title)
@@ -309,6 +320,8 @@ class QFBridgeService(xbmc.Monitor):
         self._set_property(RES_REASON, reason)
         if meta:
             self._set_property(RES_META, json.dumps(meta, ensure_ascii=False))
+        else:
+            self._set_property(RES_META, "")
         self._set_property(RES_TS, str(response_ts))
         self._set_property(RES_FOR_REQ_ID, response_for_req_id)
         # Write response id last so clients can treat it as commit marker.
@@ -971,11 +984,21 @@ class QFBridgeService(xbmc.Monitor):
         source = str(result.get("source") or "")
         meta = result.get("meta") or {}
         effective_hold_seconds = float(self.QF_HOLD_SECONDS)
+        stale_feed_drop_seconds = float(self.QF_STALE_FEED_DROP_SECONDS)
 
         def _clear_pending_hit():
             state["pending_hit_key"] = ""
             state["pending_hit_count"] = 0
             state["pending_hit_ts"] = 0.0
+
+        def _clear_last_hit_state():
+            state["last_artist"] = ""
+            state["last_title"] = ""
+            state["last_source"] = ""
+            state["last_reason"] = ""
+            state["last_meta"] = {}
+            state["last_hit_ts"] = 0.0
+            state["last_strong_hit_ts"] = 0.0
 
         pending_bypassed = False
         if status == "hit" and artist and title:
@@ -1062,7 +1085,7 @@ class QFBridgeService(xbmc.Monitor):
                 if reference_ts <= 0.0:
                     reference_ts = float(state.get("last_hit_ts") or 0.0)
                 weak_age = (now - reference_ts) if reference_ts > 0.0 else 0.0
-                if same_pair and reference_ts > 0.0 and weak_age > effective_hold_seconds:
+                if same_pair and reference_ts > 0.0 and weak_age > stale_feed_drop_seconds:
                     status = "no_hit"
                     reason = "generic_or_non_song"
                     artist = ""
@@ -1072,7 +1095,7 @@ class QFBridgeService(xbmc.Monitor):
                         **meta,
                         "stale_feed_only": True,
                         "stale_feed_age": round(weak_age, 3),
-                        "stale_feed_hold": round(effective_hold_seconds, 3),
+                        "stale_feed_drop_seconds": round(stale_feed_drop_seconds, 3),
                     }
                     result = {
                         "status": status,
@@ -1157,13 +1180,7 @@ class QFBridgeService(xbmc.Monitor):
 
         # Song-Ende priorisieren: bestätigte no-hit/empty-Signale dürfen Hold sofort beenden.
         if no_hit_confirmed or empty_confirmed:
-            state["last_artist"] = ""
-            state["last_title"] = ""
-            state["last_source"] = ""
-            state["last_reason"] = ""
-            state["last_meta"] = {}
-            state["last_hit_ts"] = 0.0
-            state["last_strong_hit_ts"] = 0.0
+            _clear_last_hit_state()
             state["no_hit_streak"] = 0
             state["empty_streak"] = 0
             _clear_pending_hit()
@@ -1749,6 +1766,12 @@ class QFBridgeService(xbmc.Monitor):
         station_key = self._build_station_key(station_name, station_id=station_id)
 
         def _get_supersede_meta(phase):
+            phase_name = str(phase or "").strip().lower()
+            is_preflight = phase_name == "before_resolve"
+            if is_preflight and not self.QF_SUPERSEDE_PREEMPT_ENABLED:
+                return None
+            if (not is_preflight) and not self.QF_SUPERSEDE_MIDFLIGHT_ENABLED:
+                return None
             superseded, newer_req_id, newer_station_key = self._is_request_superseded(req_id, station_key)
             if not superseded:
                 return None

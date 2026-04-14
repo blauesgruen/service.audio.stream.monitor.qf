@@ -96,6 +96,8 @@ Wichtige QF-Schalter:
 - `QF_STATION_KEY_NAME_FALLBACK_ENABLED`
 - `QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS`
 - `QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES`
+- `QF_SUPERSEDE_PREEMPT_ENABLED`
+- `QF_SUPERSEDE_MIDFLIGHT_ENABLED`
 
 ## Betriebshinweise
 
@@ -104,6 +106,7 @@ Wichtige QF-Schalter:
 - Wichtiger als Delivery ist die stabile Origin-/Songquelle.
 - Feed-Kandidaten werden einmal aufgebaut und dann bevorzugt abgefragt.
 - Bei ueberholten Requests schreibt `ASM-QF` explizit `status=aborted` (kein stiller Abbruchpfad).
+- Standardbetrieb: Supersede ist als Preflight aktiv (vor Start der Bearbeitung), Midflight-Supersede ist standardmaessig deaktiviert, um Abbruch-Kaskaden zu vermeiden.
 
 ## Troubleshooting
 
