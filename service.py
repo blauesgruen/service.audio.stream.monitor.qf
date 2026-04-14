@@ -1734,7 +1734,6 @@ class QFBridgeService(xbmc.Monitor):
             mode=mode,
             status="pending",
         )
-        self._set_property(RES_STATION_USED, "")
 
         if not self._get_setting_bool("provider_finder_enabled", default=False):
             self.logger.info(
