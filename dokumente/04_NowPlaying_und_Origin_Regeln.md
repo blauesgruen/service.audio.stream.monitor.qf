@@ -145,6 +145,20 @@ Wenn bereits eine verifizierte Quelle fuer den Sender vorliegt, wird diese bevor
 
 Dadurch werden unnoetige Voll-Discovery-Laeufe reduziert.
 
+## QF-Parity gegen Flackern (Kodi)
+
+Die Kodi-Bridge (`ASM-QF`) nutzt zusaetzlich eine Parity-Schicht fuer stabile Entscheidungen:
+
+- `QF_HOLD_SECONDS` wird durch `QF_HOLD_SECONDS_MAX` begrenzt (aktuell max. 3.0s).
+- Ein schwacher Feed-only-Hit (`web_feed_*` + fehlendes klares Stream-Signal) wird nicht sofort
+  in `no_hit` abgewertet, sondern erst nach `QF_STALE_FEED_DROP_SECONDS` (konservativ, aktuell 180s).
+- Ziel: kurze Jingle-/Status-Phasen ueberbruecken, ohne echte Songwechsel dauerhaft zu maskieren.
+
+Wichtig:
+
+- Songende bleibt priorisiert: bei bestaetigtem `no_hit` wird der letzte Songzustand beendet.
+- Das reduziert `hit -> no_hit -> hit`-Pendeln bei verzoegerten Feed-/ICY-Zyklen.
+
 ## Name-Varianten / station_key-Fallback
 
 Fuer Sender mit leicht variierenden Namensformen kann ein konservativer Name-Fallback greifen

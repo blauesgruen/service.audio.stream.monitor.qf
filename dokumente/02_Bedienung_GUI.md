@@ -57,6 +57,13 @@ Wichtige Meldungen:
 - `ASM-QF Request gesendet`: Request an die Kodi-Bridge wurde geschrieben
 - `event=request_result ... status=aborted`: ueberholter Request wurde deterministisch beendet
 - `event=result_cache_hit` / `reason=verified_source_fastpath`: schneller Treffer ohne volle Aufloesungskette
+- `event=request_result ... status=error reason=resolver_exception`: Sendername/Quelle konnte in diesem Lauf nicht ausreichend aufgeloest werden
+
+Parity-Hinweise (Kodi-Bridge):
+
+- `hold_seconds` ist in QF gedeckelt (`QF_HOLD_SECONDS_MAX`, aktuell 3.0s).
+- Feed-only-Stale-Drops greifen erst nach `QF_STALE_FEED_DROP_SECONDS` (aktuell konservativ 180s),
+  um kurzes `hit/no_hit`-Flackern zu vermeiden.
 
 ## Quell-Details-Fenster: Sektionen
 

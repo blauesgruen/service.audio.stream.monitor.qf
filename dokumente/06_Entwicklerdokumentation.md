@@ -268,6 +268,13 @@ Response-Felder (`ASM-QF` -> `ASM`):
 - Das gilt auch fuer Abbruchpfade wie `request_superseded` (Status `aborted`).
 - Keine stillen Returns ohne Response-Write nach `request_received`.
 
+Parity-Detail:
+
+- Die finale Hit/No-Hit-Entscheidung erfolgt in `_apply_qf_parity_policy`.
+- Hold-Zeit ist gedeckelt: `effective_hold = min(QF_HOLD_SECONDS, QF_HOLD_SECONDS_MAX)`.
+- Ein Feed-only-Hit wird erst nach `QF_STALE_FEED_DROP_SECONDS` als stale-only abgewertet.
+- Bei bestaetigtem Songende wird der letzte Hit-Status atomar geloescht (keine teilweisen State-Resets).
+
 Supersede-Policy:
 
 - Default ist Preflight-Supersede (vor Start der Bearbeitung).
@@ -282,6 +289,14 @@ Supersede-Policy:
 - `aborted`
 - `error`
 - `timeout`
+
+### Relevante QF-Parameter fuer Parity
+
+- `QF_HOLD_SECONDS`
+- `QF_HOLD_SECONDS_MAX`
+- `QF_STALE_FEED_DROP_SECONDS`
+- `QF_NO_HIT_CONFIRM`
+- `QF_EMPTY_CONFIRM`
 
 ### Log-Checks fuer Contract-Verletzungen
 

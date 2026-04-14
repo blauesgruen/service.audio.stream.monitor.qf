@@ -93,6 +93,8 @@ Wichtige QF-Schalter:
 - `QF_FASTPATH_VERIFIED_SOURCE_ENABLED`
 - `QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED`
 - `QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS`
+- `QF_HOLD_SECONDS`, `QF_HOLD_SECONDS_MAX`
+- `QF_STALE_FEED_DROP_SECONDS`
 - `QF_STATION_KEY_NAME_FALLBACK_ENABLED`
 - `QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS`
 - `QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES`
@@ -107,6 +109,8 @@ Wichtige QF-Schalter:
 - Feed-Kandidaten werden einmal aufgebaut und dann bevorzugt abgefragt.
 - Bei ueberholten Requests schreibt `ASM-QF` explizit `status=aborted` (kein stiller Abbruchpfad).
 - Standardbetrieb: Supersede ist als Preflight aktiv (vor Start der Bearbeitung), Midflight-Supersede ist standardmaessig deaktiviert, um Abbruch-Kaskaden zu vermeiden.
+- Der effektive Hold ist auf `QF_HOLD_SECONDS_MAX` gedeckelt (auch wenn `QF_HOLD_SECONDS` hoeher gesetzt wird).
+- Feed-only-Stale-Drops greifen erst nach `QF_STALE_FEED_DROP_SECONDS`, um kurze Statusphasen nicht als Songende zu fehlinterpretieren.
 
 ## Troubleshooting
 

@@ -95,6 +95,14 @@ Die UI aktualisiert damit gezielt einzelne Felder.
   - Feed-Quelle -> Feed-Probe (`fetch_now_playing`)
 - Vollkette: Lookup -> Resolve -> ICY -> Discovery -> Policy/Parity-Entscheidung.
 
+### Parity-Entscheidung (Kodi-Bridge)
+
+- Die finale Entscheidung fuer `hit`/`no_hit` laeuft zentral in `QFBridgeService._apply_qf_parity_policy`.
+- `QF_HOLD_SECONDS` wird zur Laufzeit durch `QF_HOLD_SECONDS_MAX` hart gedeckelt (aktuell 3.0s).
+- Feed-only-Hits mit schwachem Stream-Signal werden nicht mehr nach wenigen Sekunden verworfen,
+  sondern erst nach `QF_STALE_FEED_DROP_SECONDS` (konservatives Drop-Fenster).
+- Bei bestaetigtem Songende (`no_hit`/`empty` bestaetigt) wird der letzte Hit-Status atomar geloescht.
+
 ### station_key-Fallback
 
 - Name-Varianten koennen ueber einen konservativen Name-Fallback als kompatibel behandelt werden
