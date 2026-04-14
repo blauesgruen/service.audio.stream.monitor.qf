@@ -238,6 +238,54 @@ Technische Schluesselereignisse loggen:
 
 Kein Logging sensibler Daten ausserdem noetigen HTTP-Metadaten.
 
+## Kodi Bridge Contract (ASM <-> ASM-QF)
+
+Kommunikation erfolgt ueber `Window(10000)`-Properties.
+
+Request-Felder (`ASM` -> `ASM-QF`):
+
+- `RadioMonitor.QF.Request.Id`
+- `RadioMonitor.QF.Request.Station`
+- `RadioMonitor.QF.Request.StationId`
+- `RadioMonitor.QF.Request.Mode`
+- `RadioMonitor.QF.Request.Ts`
+
+Response-Felder (`ASM-QF` -> `ASM`):
+
+- `RadioMonitor.QF.Response.Id`
+- `RadioMonitor.QF.Response.Status`
+- `RadioMonitor.QF.Response.Artist`
+- `RadioMonitor.QF.Response.Title`
+- `RadioMonitor.QF.Response.Source`
+- `RadioMonitor.QF.Response.Reason`
+- `RadioMonitor.QF.Response.Meta`
+- `RadioMonitor.QF.Response.Ts`
+- `RadioMonitor.QF.Response.ForReqId`
+
+### Verbindliche Regel
+
+- Fuer jeden in `ASM-QF` angenommenen Request wird genau eine Response geschrieben.
+- Das gilt auch fuer Abbruchpfade wie `request_superseded` (Status `aborted`).
+- Keine stillen Returns ohne Response-Write nach `request_received`.
+
+### Erwartete Statuswerte
+
+- `hit`
+- `no_hit`
+- `blocked`
+- `aborted`
+- `error`
+- `timeout`
+
+### Log-Checks fuer Contract-Verletzungen
+
+Pruefen bei Laufzeitproblemen:
+
+1. Auf jeden `event=request_received` folgt ein `event=request_result` mit gleicher `req_id`.
+2. Auf jeden `event=request_result` folgt ein `event=response_written` mit gleicher `req_id`.
+3. Bei `event=request_superseded_abort` muss ein `request_result status=aborted reason=request_superseded` erscheinen.
+4. Bei `ASM-QF DIAG ... fresh_reason=missing_response_id` ueber laengere Zeit liegt meist ein Response-Contract-Bruch vor.
+
 ## Fehlerbilder und Debug-Strategie
 
 ### Fehlerbild: "Kein Song trotz sichtbarem Website-NowPlaying"

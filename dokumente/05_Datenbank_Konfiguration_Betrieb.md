@@ -36,6 +36,21 @@ Unique-Key:
 
 Speichern ist ein Upsert: vorhandene Eintraege werden aktualisiert, nicht dupliziert.
 
+## Kodi-Bridge-DB (ASM-QF)
+
+Pfad:
+
+- `special://userdata/addon_data/service.audio.stream.monitor.qf/song_data.db`
+
+Tabelle:
+
+- `verified_station_sources`
+
+Zweck:
+
+- bevorzugte, verifizierte Quellen fuer den Fastpath in `ASM-QF`
+- Lookup primaer ueber `station_key`, optional ueber konservativen Name-Fallback
+
 ## Beispielabfrage
 
 ```sql
@@ -72,12 +87,23 @@ Wichtige Schalter:
 - `EPG_REQUEST_TIMEOUT_SECONDS`
   - Timeout EPG-Probe
 
+Wichtige QF-Schalter:
+
+- `QF_RESULT_CACHE_ENABLED`, `QF_RESULT_CACHE_TTL_SECONDS`
+- `QF_FASTPATH_VERIFIED_SOURCE_ENABLED`
+- `QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED`
+- `QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS`
+- `QF_STATION_KEY_NAME_FALLBACK_ENABLED`
+- `QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS`
+- `QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES`
+
 ## Betriebshinweise
 
 - Sender mit problematischen Zertifikaten koennen dennoch teilweise funktionieren (SSL fallback).
 - Delivery-URLs mit Token koennen sich oft aendern; das ist normal.
 - Wichtiger als Delivery ist die stabile Origin-/Songquelle.
 - Feed-Kandidaten werden einmal aufgebaut und dann bevorzugt abgefragt.
+- Bei ueberholten Requests schreibt `ASM-QF` explizit `status=aborted` (kein stiller Abbruchpfad).
 
 ## Troubleshooting
 

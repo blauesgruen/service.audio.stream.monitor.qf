@@ -54,6 +54,9 @@ Wichtige Meldungen:
 - `Song erkannt`: neuer Songwechsel erkannt
 - `Songende erkannt`: aktuell kein klarer Song mehr (z. B. Jingle/Beitrag)
 - `Songabfrage fehlgeschlagen`: ICY aktuell nicht verwertbar; Discovery laeuft trotzdem weiter
+- `ASM-QF Request gesendet`: Request an die Kodi-Bridge wurde geschrieben
+- `event=request_result ... status=aborted`: ueberholter Request wurde deterministisch beendet
+- `event=result_cache_hit` / `reason=verified_source_fastpath`: schneller Treffer ohne volle Aufloesungskette
 
 ## Quell-Details-Fenster: Sektionen
 

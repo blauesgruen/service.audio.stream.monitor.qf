@@ -136,6 +136,24 @@ Wichtig:
 
 - Wenn ICY im aktuellen Zyklus keinen verwertbaren Song liefert, wird die Feed-Discovery trotzdem weiter ausgefuehrt.
 
+## Verified-Source-Fastpath (Kodi-Bridge)
+
+Wenn bereits eine verifizierte Quelle fuer den Sender vorliegt, wird diese bevorzugt direkt geprueft:
+
+- Stream-Quelle (`stream_*`) -> ICY-Probe
+- Feed-Quelle (`web_feed_*`) -> direkte Feed-Probe (`fetch_now_playing`)
+
+Dadurch werden unnoetige Voll-Discovery-Laeufe reduziert.
+
+## Name-Varianten / station_key-Fallback
+
+Fuer Sender mit leicht variierenden Namensformen kann ein konservativer Name-Fallback greifen
+(z. B. Basisname vs. regionale Variante), konfigurierbar in `app/config.py`.
+
+Wichtig:
+
+- Der Fallback ist absichtlich streng (Prefix-Kompatibilitaet + Mindest-Token), um Fehlzuordnungen zu vermeiden.
+
 ## Offizielle Player-Config (generisch)
 
 Wenn eine Seite `data-mandate` + `webradio.js` enthaelt, wird zusaetzlich versucht:

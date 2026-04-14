@@ -25,6 +25,8 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Live-Log in separatem Fenster
 - Quell-Details-Fenster mit Rohdaten (Lookup-JSON, Header, Raw-Metadaten, EPG-XML)
 - Speicherung verifizierter Quellen in SQLite (`radio_sources.db`)
+- Kodi-Bridge-Contract (`ASM <-> ASM-QF`): pro angenommenem Request genau eine Response (inkl. `aborted` bei superseded)
+- Verified-Source-Fastpath prueft Quellen typgerecht (Stream via ICY, Feed via Feed-Probe)
 
 ## Start
 ```bash

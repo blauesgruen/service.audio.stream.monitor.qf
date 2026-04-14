@@ -12,6 +12,10 @@ Diese Dokumentation beschreibt das Tool vollstaendig aus Anwendersicht und aus t
 6. [Entwicklerdokumentation](./06_Entwicklerdokumentation.md)
 7. [Senderlisten und Batchtests](./senderlisten_und_batchtests/README.md)
 
+Hinweis:
+
+- Der Kodi-Bridge-Contract (`ASM <-> ASM-QF`, inkl. Pflicht-Response auch bei `aborted/superseded`) ist in `06_Entwicklerdokumentation.md` dokumentiert.
+
 ## Schnellstart
 
 ```bash

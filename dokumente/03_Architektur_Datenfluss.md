@@ -79,6 +79,27 @@ Die UI aktualisiert damit gezielt einzelne Felder.
    - Songende erkennen bei fehlendem klaren Song
 9. Optional `SourceDatabase.upsert_verified_source()`
 
+## Kodi-Bridge-Datenfluss (`service.py`)
+
+1. `ASM` schreibt Request-Properties (`RadioMonitor.QF.Request.*`) mit `req_id`.
+2. `ASM-QF` liest Request, verarbeitet Lookup/Resolve/ICY/Discovery.
+3. Ergebnis wird als Response (`RadioMonitor.QF.Response.*`) geschrieben.
+4. Auch bei ueberholtem Request (superseded) schreibt `ASM-QF` eine Response mit `status=aborted`.
+
+### Aktuelle Laufketten in `ASM-QF`
+
+- `result_cache_hit`: schneller Hit aus In-Memory-Result-Cache.
+- `resolution_cache_hit`: Sender-/Resolve-Daten aus In-Memory-Resolution-Cache.
+- `verified_source_fastpath`: verifizierte Quelle direkt pruefen.
+  - Stream-Quelle -> ICY-Probe
+  - Feed-Quelle -> Feed-Probe (`fetch_now_playing`)
+- Vollkette: Lookup -> Resolve -> ICY -> Discovery -> Policy/Parity-Entscheidung.
+
+### station_key-Fallback
+
+- Name-Varianten koennen ueber einen konservativen Name-Fallback als kompatibel behandelt werden
+  (DB-Lookup, Cache-Lookup, Supersede-Erkennung), konfigurierbar ueber `app/config.py`.
+
 ## Fehlerbehandlung (hoch-level)
 
 - Netzwerk- und Parse-Fehler werden in Log und Status gespiegelt.
