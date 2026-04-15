@@ -28,7 +28,6 @@ RES_REASON = "RadioMonitor.QF.Response.Reason"
 RES_META = "RadioMonitor.QF.Response.Meta"
 RES_TS = "RadioMonitor.QF.Response.Ts"
 RES_FOR_REQ_ID = "RadioMonitor.QF.Response.ForReqId"
-RES_STATION_USED = "RadioMonitor.QF.Response.StationUsed"
 
 QF_ADDON_ID = "service.audio.stream.monitor.qf"
 QF_VERIFIED_SOURCE_KIND = "qf_verified"
@@ -299,7 +298,6 @@ class QFBridgeService(xbmc.Monitor):
         self._set_property(RES_META, "")
         self._set_property(RES_TS, "")
         self._set_property(RES_FOR_REQ_ID, "")
-        self._set_property(RES_STATION_USED, "")
 
     def _write_response(
         self,
@@ -321,9 +319,16 @@ class QFBridgeService(xbmc.Monitor):
         self._set_property(RES_TITLE, title)
         self._set_property(RES_SOURCE, source)
         self._set_property(RES_REASON, reason)
-        self._set_property(RES_STATION_USED, station_used)
-        if meta:
-            self._set_property(RES_META, json.dumps(meta, ensure_ascii=False))
+        if isinstance(meta, dict):
+            response_meta = dict(meta)
+        else:
+            response_meta = {}
+        station_used_value = self._sanitize_station_text(station_used)
+        if station_used_value:
+            # ASM liest den finalen Stationsnamen aus Meta und setzt sein eigenes Label.
+            response_meta["station_used"] = station_used_value
+        if response_meta:
+            self._set_property(RES_META, json.dumps(response_meta, ensure_ascii=False))
         else:
             self._set_property(RES_META, "")
         self._set_property(RES_TS, str(response_ts))
