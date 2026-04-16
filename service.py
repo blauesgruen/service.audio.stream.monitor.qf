@@ -115,6 +115,7 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_FASTPATH_VERIFIED_SOURCE_ENABLED = True
         self.QF_VERIFIED_SOURCE_MAX_AGE_SECONDS = 43200
         self.QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED = True
+        self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_ENABLED = True
         self.QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS = 1.2
         self.QF_PHASE_TIMING_PRECISION = 3
         self.QF_RESULT_CACHE_ENABLED = True
@@ -212,6 +213,7 @@ class QFBridgeService(xbmc.Monitor):
                 QF_FASTPATH_VERIFIED_SOURCE_ENABLED,
                 QF_VERIFIED_SOURCE_MAX_AGE_SECONDS,
                 QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED,
+                QF_VERIFIED_SOURCE_STREAM_FASTPATH_ENABLED,
                 QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS,
             )
             from app.metadata import SongMetadataFetcher
@@ -254,6 +256,7 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_FASTPATH_VERIFIED_SOURCE_ENABLED = bool(QF_FASTPATH_VERIFIED_SOURCE_ENABLED)
         self.QF_VERIFIED_SOURCE_MAX_AGE_SECONDS = max(0, int(QF_VERIFIED_SOURCE_MAX_AGE_SECONDS))
         self.QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED = bool(QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED)
+        self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_ENABLED = bool(QF_VERIFIED_SOURCE_STREAM_FASTPATH_ENABLED)
         self.QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS = max(0.1, float(QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS))
         self.QF_PHASE_TIMING_PRECISION = max(1, int(QF_PHASE_TIMING_PRECISION))
         self.QF_RESULT_CACHE_ENABLED = bool(QF_RESULT_CACHE_ENABLED)
@@ -609,6 +612,9 @@ class QFBridgeService(xbmc.Monitor):
             song.title = t
             return song, "ok"
 
+        if not self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_ENABLED:
+            return None, "stream_disabled"
+
         song = fetcher.fetch(source_url)
         a, t, pair_state = self.prefilter_pair(
             song.artist,
@@ -623,6 +629,94 @@ class QFBridgeService(xbmc.Monitor):
         song.artist = a
         song.title = t
         return song, "ok"
+
+    def _try_verified_source_fastpath_hit(
+        self,
+        *,
+        station_name_hint,
+        station_id="",
+        station_key="",
+        fetcher=None,
+        discovery=None,
+    ):
+        if not self.QF_FASTPATH_VERIFIED_SOURCE_ENABLED:
+            return None, "disabled"
+
+        station_name_hint = str(station_name_hint or "").strip()
+        station_id_value = str(station_id or "").strip()
+        station_id_norm = self._normalize_station_id(station_id_value)
+        key = str(station_key or "").strip() or self._build_station_key(
+            station_name_hint,
+            station_id=station_id_value,
+        )
+        if not key:
+            return None, "missing_station_key"
+
+        source_repo = self._get_verified_source_repository()
+        if not source_repo:
+            return None, "repo_unavailable"
+
+        candidate = source_repo.get_preferred_source(
+            key,
+            max_age_seconds=int(self.QF_VERIFIED_SOURCE_MAX_AGE_SECONDS),
+            allow_name_fallback=bool(self.QF_STATION_KEY_NAME_FALLBACK_ENABLED),
+            min_name_tokens=int(self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS),
+            max_name_candidates=int(self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES),
+        )
+        if not candidate:
+            return None, "miss"
+
+        verified_source_url = str(candidate.get("source_url") or "").strip()
+        if not verified_source_url:
+            return None, "empty_source_url"
+
+        if fetcher is None or discovery is None:
+            _, _, fetcher, discovery = self._get_core_services()
+
+        candidate_meta = candidate.get("meta") if isinstance(candidate, dict) else {}
+        candidate_kind = self._classify_verified_source_fastpath_kind(
+            verified_source_url,
+            meta=candidate_meta,
+        )
+
+        try:
+            fast_song, probe_state = self._probe_verified_source_fastpath(
+                source_url=verified_source_url,
+                source_kind=candidate_kind,
+                station_name_hint=station_name_hint,
+                station_id_value=station_id_value,
+                station_id_norm=station_id_norm,
+                fetcher=fetcher,
+                discovery=discovery,
+            )
+        except Exception as err:
+            self.logger.debug(
+                "verified_source_fastpath_probe_failed",
+                station_key=key,
+                source_url=verified_source_url,
+                source_kind=candidate_kind,
+                error=str(err),
+            )
+            return None, f"probe_{candidate_kind}_error"
+
+        if not fast_song:
+            return None, f"probe_{candidate_kind}_{probe_state}"
+
+        return {
+            "status": "hit",
+            "artist": fast_song.artist,
+            "title": fast_song.title,
+            "source": fast_song.source_kind,
+            "reason": "verified_source_fastpath",
+            "meta": {
+                "station": station_name_hint,
+                "source_approval": "verified_source_cache",
+                "source_url": fast_song.source_url or verified_source_url,
+                "resolved_url": "",
+                "delivery_url": "",
+                "verified_source_kind": candidate_kind,
+            },
+        }, f"hit_{candidate_kind}"
 
     def _get_cached_resolution(self, cache_key):
         if not cache_key:
@@ -1260,7 +1354,7 @@ class QFBridgeService(xbmc.Monitor):
         self._prune_station_state()
         return result
 
-    def _resolve_song(self, station_input, station_id="", station_key="", supersede_check=None):
+    def _resolve_song(self, station_input, station_id="", station_key="", supersede_check=None, skip_verified_fastpath=False):
         lookup, resolver, fetcher, discovery = self._get_core_services()
 
         phase_timings = {}
@@ -1311,73 +1405,20 @@ class QFBridgeService(xbmc.Monitor):
         station_id_value = (station_id or "").strip()
 
         fastpath_started = time.time()
-        if self.QF_FASTPATH_VERIFIED_SOURCE_ENABLED:
-            verified_fastpath_state = "miss"
-            station_key = self._build_station_key(station_name_hint, station_id=station_id)
-            source_repo = self._get_verified_source_repository()
-            if source_repo and station_key:
-                candidate = source_repo.get_preferred_source(
-                    station_key,
-                    max_age_seconds=int(self.QF_VERIFIED_SOURCE_MAX_AGE_SECONDS),
-                    allow_name_fallback=bool(self.QF_STATION_KEY_NAME_FALLBACK_ENABLED),
-                    min_name_tokens=int(self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS),
-                    max_name_candidates=int(self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES),
-                )
-                if candidate:
-                    verified_source_url = str(candidate.get("source_url") or "").strip()
-                    if verified_source_url:
-                        verified_fastpath_state = "candidate"
-                        probe_started = time.time()
-                        fast_song = None
-                        candidate_meta = candidate.get("meta") if isinstance(candidate, dict) else {}
-                        candidate_kind = self._classify_verified_source_fastpath_kind(
-                            verified_source_url,
-                            meta=candidate_meta,
-                        )
-                        try:
-                            fast_song, probe_state = self._probe_verified_source_fastpath(
-                                source_url=verified_source_url,
-                                source_kind=candidate_kind,
-                                station_name_hint=station_name_hint,
-                                station_id_value=station_id_value,
-                                station_id_norm=station_id_norm,
-                                fetcher=fetcher,
-                                discovery=discovery,
-                            )
-                            verified_fastpath_state = f"probe_{candidate_kind}_{probe_state}"
-                            if probe_state == "ok":
-                                verified_fastpath_state = f"probe_{candidate_kind}_ok"
-                        except Exception as err:
-                            verified_fastpath_state = f"probe_{candidate_kind}_error"
-                            self.logger.debug(
-                                "verified_source_fastpath_probe_failed",
-                                station_key=station_key,
-                                source_url=verified_source_url,
-                                source_kind=candidate_kind,
-                                error=str(err),
-                            )
-                        _mark_phase("verified_source_probe", probe_started)
-
-                        if fast_song:
-                            verified_fastpath_state = f"hit_{candidate_kind}"
-                            _mark_phase("verified_source_lookup", fastpath_started)
-                            return {
-                                "status": "hit",
-                                "artist": fast_song.artist,
-                                "title": fast_song.title,
-                                "source": fast_song.source_kind,
-                                "reason": "verified_source_fastpath",
-                                "meta": _attach_phase_meta(
-                                    {
-                                        "station": station_name_hint,
-                                        "source_approval": "verified_source_cache",
-                                        "source_url": fast_song.source_url or verified_source_url,
-                                        "resolved_url": "",
-                                        "delivery_url": "",
-                                        "verified_source_kind": candidate_kind,
-                                    }
-                                ),
-                            }
+        if skip_verified_fastpath:
+            verified_fastpath_state = "skipped_prechecked"
+        elif self.QF_FASTPATH_VERIFIED_SOURCE_ENABLED:
+            fast_result, verified_fastpath_state = self._try_verified_source_fastpath_hit(
+                station_name_hint=station_name_hint,
+                station_id=station_id,
+                station_key=station_key,
+                fetcher=fetcher,
+                discovery=discovery,
+            )
+            if fast_result:
+                _mark_phase("verified_source_lookup", fastpath_started)
+                fast_result["meta"] = _attach_phase_meta(fast_result.get("meta") or {})
+                return fast_result
         _mark_phase("verified_source_lookup", fastpath_started)
 
         superseded = _check_superseded("after_verified_source_lookup")
@@ -1836,10 +1877,42 @@ class QFBridgeService(xbmc.Monitor):
             return
 
         try:
+            fastpath_result, fastpath_state = self._try_verified_source_fastpath_hit(
+                station_name_hint=station_name,
+                station_id=station_id,
+                station_key=station_key,
+            )
             cached_result = self._get_cached_result(station_key)
-            if cached_result:
+
+            def _pair_from(result_obj):
+                artist = str((result_obj or {}).get("artist") or "").strip().lower()
+                title = str((result_obj or {}).get("title") or "").strip().lower()
+                return artist, title
+
+            if fastpath_result:
+                result = dict(fastpath_result)
+                result_meta = dict(result.get("meta") or {})
+                result_meta["verified_fastpath_state"] = fastpath_state
+                if cached_result:
+                    cached_pair = _pair_from(cached_result)
+                    fresh_pair = _pair_from(fastpath_result)
+                    if cached_pair != fresh_pair:
+                        self.logger.debug(
+                            "result_cache_bypassed_pair_changed",
+                            station_key=station_key,
+                            cached_artist=cached_result.get("artist") or "",
+                            cached_title=cached_result.get("title") or "",
+                            fresh_artist=fastpath_result.get("artist") or "",
+                            fresh_title=fastpath_result.get("title") or "",
+                        )
+                        result_meta["result_cache_bypassed"] = "pair_changed"
+                    else:
+                        result_meta["result_cache_bypassed"] = "pair_unchanged"
+                result["meta"] = result_meta
+            elif cached_result:
                 cached_meta = dict((cached_result.get("meta") or {}))
                 cached_meta["result_cache_hit"] = True
+                cached_meta["verified_fastpath_state"] = fastpath_state
                 result = {
                     "status": cached_result.get("status") or "hit",
                     "artist": cached_result.get("artist") or "",
@@ -1855,6 +1928,7 @@ class QFBridgeService(xbmc.Monitor):
                     station_id=station_id,
                     station_key=station_key,
                     supersede_check=lambda phase: bool(_get_supersede_meta(phase)),
+                    skip_verified_fastpath=True,
                 )
 
             if _finalize_superseded("after_resolve"):
