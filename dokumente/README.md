@@ -15,9 +15,10 @@ Diese Dokumentation beschreibt das Tool vollstaendig aus Anwendersicht und aus t
 Hinweis:
 
 - Der Kodi-Bridge-Contract (`ASM <-> ASM-QF`, inkl. Pflicht-Response auch bei `aborted/superseded`) ist in `06_Entwicklerdokumentation.md` dokumentiert.
-- Das Runtime-Label-Property `RadioMonitor.QF.Response.StationUsed` (effektiv verwendeter Sender) ist dort ebenfalls beschrieben.
-  - Verhalten: bleibt waehrend `pending` auf dem letzten terminalen Wert und wird erst bei terminaler Response aktualisiert.
-- Die aktuelle Request-Reihenfolge in ASM-QF lautet: `verified_source_fastpath` -> `result_cache` -> Vollkette; bei Paarwechsel kann Cache bewusst uebergangen werden (`result_cache_bypassed_pair_changed`).
+- ASM-QF liefert den effektiv verwendeten Sender in `RadioMonitor.QF.Response.Meta.station_used`; ASM setzt daraus sein eigenes Label (ASM-Namespace).
+- Die aktuelle Request-Reihenfolge in ASM-QF lautet: `verified_source_fastpath` -> (optional) `result_cache` -> Vollkette.
+  - `result_cache` wird nur als Fallback bei echtem `verified_source`-Miss genutzt.
+  - Bei Fastpath-Probe-Miss (Feed/ICY ohne gueltiges Paar) wird der Cache uebergangen (`result_cache_bypassed_verified_probe_state`).
 - Die aktuellen Parity-Stabilitaetsregeln (`QF_HOLD_SECONDS_MAX`, `QF_STALE_FEED_DROP_SECONDS`) sind in `04_...`, `05_...` und `06_...` beschrieben.
 
 ## Schnellstart

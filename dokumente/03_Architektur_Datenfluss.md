@@ -84,8 +84,8 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 1. `ASM` schreibt Request-Properties (`RadioMonitor.QF.Request.*`) mit `req_id`.
 2. `ASM-QF` liest Request, verarbeitet Lookup/Resolve/ICY/Discovery.
 3. Ergebnis wird als Response (`RadioMonitor.QF.Response.*`) geschrieben.
-   - inkl. `RadioMonitor.QF.Response.StationUsed` (effektiv verwendeter Sender in QF)
-   - `StationUsed` bleibt waehrend `pending` auf dem letzten terminalen Wert und wird bei terminaler Response aktualisiert
+   - inkl. `RadioMonitor.QF.Response.Meta.station_used` (effektiv verwendeter Sender in QF)
+   - ASM uebernimmt diesen Wert und schreibt das Label in seinem eigenen Namespace (nicht als eigenes QF-Response-Feld)
 4. Auch bei ueberholtem Request (superseded) schreibt `ASM-QF` eine Response mit `status=aborted`.
 
 ### Aktuelle Laufketten in `ASM-QF`
@@ -93,10 +93,12 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - `verified_source_fastpath`: verifizierte Quelle wird zuerst direkt geprueft.
   - Stream-Quelle -> ICY-Probe
   - Feed-Quelle -> Feed-Probe (`fetch_now_playing`)
-- `result_cache_hit`: schneller In-Memory-Fallback, wenn Fastpath keinen Treffer liefert.
+- `result_cache_hit`: schneller In-Memory-Fallback nur bei echtem Fastpath-Miss ohne Probe-Treffer (`fastpath_state=miss`).
+- `result_cache_bypassed_verified_probe_state`: ein alter Cache-Hit wird verworfen, wenn die verifizierte Quelle zwar geprobt wurde, aber aktuell kein gueltiges Paar liefert.
 - `result_cache_bypassed_pair_changed`: ein alter Cache-Hit wird bewusst verworfen, wenn ein frischer Fastpath ein anderes `artist/title`-Paar liefert.
 - `resolution_cache_hit`: Sender-/Resolve-Daten aus In-Memory-Resolution-Cache innerhalb der Vollkette.
-- Vollkette: Lookup -> Resolve -> ICY -> Discovery -> Policy/Parity-Entscheidung, nur bei Fastpath+Result-Cache-Miss.
+- Bei Probe-Miss der verifizierten Quelle kann direkt `no_hit` aus dem Fastpath-Zweig geliefert werden (ohne sofortige Vollkette).
+- Vollkette: Lookup -> Resolve -> ICY -> Discovery -> Policy/Parity-Entscheidung, nur wenn Fastpath/Cache keinen verwertbaren Zustand liefern.
 
 ### Parity-Entscheidung (Kodi-Bridge)
 

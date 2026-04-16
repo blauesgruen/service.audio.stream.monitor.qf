@@ -90,9 +90,11 @@ Wichtige Schalter:
 Wichtige QF-Schalter:
 
 - `QF_RESULT_CACHE_ENABLED`, `QF_RESULT_CACHE_TTL_SECONDS`
+- `QF_RESULT_CACHE_USE_ONLY_ON_VERIFIED_SOURCE_MISS`
 - `QF_FASTPATH_VERIFIED_SOURCE_ENABLED`
 - `QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED`
 - `QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS`
+- `QF_VERIFIED_PROBE_MISS_RETURNS_NO_HIT`
 - `QF_HOLD_SECONDS`, `QF_HOLD_SECONDS_MAX`
 - `QF_STALE_FEED_DROP_SECONDS`
 - `QF_STATION_KEY_NAME_FALLBACK_ENABLED`
@@ -109,8 +111,9 @@ Wichtige QF-Schalter:
 - Feed-Kandidaten werden einmal aufgebaut und dann bevorzugt abgefragt.
 - Bei ueberholten Requests schreibt `ASM-QF` explizit `status=aborted` (kein stiller Abbruchpfad).
 - Standardbetrieb: Supersede ist als Preflight aktiv (vor Start der Bearbeitung), Midflight-Supersede ist standardmaessig deaktiviert, um Abbruch-Kaskaden zu vermeiden.
-- Request-Ablauf in ASM-QF: erst `verified_source_fastpath`, dann `result_cache`; die Vollkette laeuft nur bei Doppel-Miss.
+- Request-Ablauf in ASM-QF: erst `verified_source_fastpath`, dann optional `result_cache`; die Vollkette laeuft nur bei Doppel-Miss oder wenn explizit noetig.
 - Wenn ein frischer Fastpath-Hit ein anderes `artist/title` liefert als der Cache, wird der Cache bewusst uebergangen (`result_cache_bypassed_pair_changed`).
+- Bei Fastpath-Probe-Miss (Feed/ICY liefert aktuell kein gueltiges Paar) wird der Cache ebenfalls uebergangen (`result_cache_bypassed_verified_probe_state`) und optional direkt `no_hit` geliefert.
 - Der effektive Hold ist auf `QF_HOLD_SECONDS_MAX` gedeckelt (auch wenn `QF_HOLD_SECONDS` hoeher gesetzt wird).
 - Feed-only-Stale-Drops greifen erst nach `QF_STALE_FEED_DROP_SECONDS`, um kurze Statusphasen nicht als Songende zu fehlinterpretieren.
 

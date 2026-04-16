@@ -261,23 +261,22 @@ Response-Felder (`ASM-QF` -> `ASM`):
 - `RadioMonitor.QF.Response.Meta`
 - `RadioMonitor.QF.Response.Ts`
 - `RadioMonitor.QF.Response.ForReqId`
-- `RadioMonitor.QF.Response.StationUsed`
 
 Semantik `StationUsed`:
 
-- wird im Finalize aus `response.meta.station` abgeleitet (sanitisiert)
-- bildet den in QF effektiv verwendeten Sender fuer Lookup/Resolve ab
-- wird bei `request_result_pending` nicht aktiv geleert
-- bleibt zwischen Requests auf dem letzten terminalen Wert stabil
-- wird mit der naechsten terminalen Response aktualisiert (`hit|no_hit|blocked|aborted|error|timeout`)
-- kann bei Fehler-/Blocked-/Abbruchpfaden leer sein
+- ASM-QF liefert den sanitisierten Wert in `response.meta.station_used`
+- ASM uebernimmt diesen Wert und setzt sein eigenes Runtime-Label im ASM-Namespace
+- damit bleibt der QF-Response-Contract schlank und ohne eigenes `Response.StationUsed`-Property
+- der Wert kann bei Fehler-/Blocked-/Abbruchpfaden leer sein
 
 Request-Entscheidungsreihenfolge (`_handle_request`):
 
 - Zuerst wird der `verified_source_fastpath` geprueft (bekannte verifizierte Quelle, typgerecht Stream/Feed).
-- Danach folgt optional `result_cache_hit` als schneller Fallback.
+- Danach folgt optional `result_cache_hit` als schneller Fallback bei echtem `verified_source`-Miss.
 - Wenn ein frischer Fastpath-Hit ein anderes `artist/title` liefert als der Cache, wird der Cache bewusst uebergangen (`event=result_cache_bypassed_pair_changed`).
-- Die Vollkette (`_resolve_song`) laeuft nur bei Fastpath+Cache-Miss.
+- Wenn eine verifizierte Quelle geprobt wurde, aber aktuell kein gueltiges Paar liefert, wird ein Cache-Hit ebenfalls bewusst verworfen (`event=result_cache_bypassed_verified_probe_state`).
+- Bei Probe-Miss kann ASM-QF direkt `no_hit` aus dem bekannten Fastpath-Pfad liefern (`meta.verified_fastpath_probe_only=true`), ohne sofort die Vollkette zu starten.
+- Die Vollkette (`_resolve_song`) laeuft nur bei Fastpath/Cache-Miss oder wenn der Fastpath-Zweig keinen finalen Zustand liefern kann.
 - Intern kann `_resolve_song(..., skip_verified_fastpath=True)` genutzt werden, um doppelte Fastpath-Probes in derselben Request-Verarbeitung zu vermeiden.
 
 ### Verbindliche Regel
@@ -342,9 +341,11 @@ Pruefen:
 
 1. Taucht `event=result_cache_hit` ohne frischen Fastpath-Treffer auf?
 2. Erscheint bei echten Wechseln `event=result_cache_bypassed_pair_changed`?
-3. Liefert Feed `starttime` und `duration`?
-4. Passt Zeitzone/Format?
-5. Werden neue Payloads abgeholt (Cache-Bust aktiv)?
+3. Erscheint bei Fastpath-Probe-Miss `event=result_cache_bypassed_verified_probe_state`?
+4. Taucht `meta.verified_fastpath_probe_only=true` auf, wenn die verifizierte Quelle aktuell kein Paar liefert?
+5. Liefert Feed `starttime` und `duration`?
+6. Passt Zeitzone/Format?
+7. Werden neue Payloads abgeholt (Cache-Bust aktiv)?
 
 ## Build- und Sanity-Check
 

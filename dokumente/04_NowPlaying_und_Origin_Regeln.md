@@ -143,6 +143,12 @@ Wenn bereits eine verifizierte Quelle fuer den Sender vorliegt, wird diese bevor
 - Stream-Quelle (`stream_*`) -> ICY-Probe
 - Feed-Quelle (`web_feed_*`) -> direkte Feed-Probe (`fetch_now_playing`)
 
+Wichtig fuer Fastpath-Bewertung:
+
+- ICY- und Feed-Treffer werden im Fastpath gleichwertig behandelt (beide koennen den finalen Hit direkt liefern).
+- Wenn eine verifizierte Quelle geprobt wurde, aber aktuell kein gueltiges Paar liefert, wird ein alter `result_cache`-Treffer nicht blind weiterverwendet.
+- In diesem Fall kann der Fastpath direkt `no_hit` liefern (`verified_fastpath_probe_only`), damit Songwechsel nicht durch stale Cache-Hits maskiert werden.
+
 Dadurch werden unnoetige Voll-Discovery-Laeufe reduziert.
 
 ## QF-Parity gegen Flackern (Kodi)

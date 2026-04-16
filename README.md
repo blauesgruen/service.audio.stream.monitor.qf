@@ -26,12 +26,11 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Quell-Details-Fenster mit Rohdaten (Lookup-JSON, Header, Raw-Metadaten, EPG-XML)
 - Speicherung verifizierter Quellen in SQLite (`radio_sources.db`)
 - Kodi-Bridge-Contract (`ASM <-> ASM-QF`): pro angenommenem Request genau eine Response (inkl. `aborted` bei superseded)
-- Kodi-Label-Property `RadioMonitor.QF.Response.StationUsed` zeigt den tatsaechlich in ASM-QF verwendeten Sender
-  - bleibt waehrend `pending` stabil auf dem letzten terminalen Wert
-  - wird mit der naechsten terminalen Response aktualisiert (`hit|no_hit|blocked|aborted|error|timeout`)
+- Der effektiv verwendete Sender wird von ASM-QF in `RadioMonitor.QF.Response.Meta` als `station_used` geliefert; ASM setzt daraus sein eigenes Label in ASM-Namespace
 - Verified-Source-Fastpath prueft bekannte Quellen typgerecht zuerst (Stream via ICY, Feed via Feed-Probe)
-- Result-Cache ist nachrangiger Fallback; bei abweichendem frischem Fastpath-Paar wird Cache bewusst uebergangen
-- Vollkette (Lookup -> Resolve -> ICY -> Discovery) laeuft nur, wenn Fastpath und Result-Cache keinen Treffer liefern
+- Result-Cache ist nachrangiger Fallback nur bei echtem `verified_source`-Miss; bei Fastpath-Probe-Miss (Feed/ICY ohne gueltiges Paar) wird Cache bewusst uebergangen
+- Bei Fastpath-Probe-Miss kann ASM-QF direkt `no_hit` aus der bekannten Quelle liefern, statt sofort die Vollkette zu starten
+- Vollkette (Lookup -> Resolve -> ICY -> Discovery) laeuft nur, wenn Fastpath und Result-Cache keinen Treffer liefern oder explizit erforderlich sind
 - QF-Parity mit begrenztem Hold (`QF_HOLD_SECONDS_MAX`) fuer stabile, aber schnelle Song-Ende-Erkennung
 - Konservatives Feed-Stale-Drop-Fenster (`QF_STALE_FEED_DROP_SECONDS`) gegen `hit/no_hit`-Flackern
 

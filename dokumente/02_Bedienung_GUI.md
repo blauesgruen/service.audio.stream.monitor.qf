@@ -57,8 +57,9 @@ Wichtige Meldungen:
 - `ASM-QF Request gesendet`: Request an die Kodi-Bridge wurde geschrieben
 - `event=request_result ... status=aborted`: ueberholter Request wurde deterministisch beendet
 - `reason=verified_source_fastpath`: schneller Treffer aus bekannter, verifizierter Quelle (ohne Vollkette)
-- `event=result_cache_hit`: schneller Treffer aus Result-Cache (nachrangiger Fallback)
+- `event=result_cache_hit`: schneller Treffer aus Result-Cache (nachrangiger Fallback bei echtem Fastpath-Miss)
 - `event=result_cache_bypassed_pair_changed`: Cache wurde bewusst uebergangen, weil ein frischer Fastpath-Hit ein anderes `artist/title`-Paar geliefert hat
+- `event=result_cache_bypassed_verified_probe_state`: Cache wurde bewusst uebergangen, weil die verifizierte Quelle aktuell kein gueltiges Paar geliefert hat
 - `event=request_result ... status=error reason=resolver_exception`: Sendername/Quelle konnte in diesem Lauf nicht ausreichend aufgeloest werden
 
 Parity-Hinweise (Kodi-Bridge):
@@ -66,9 +67,8 @@ Parity-Hinweise (Kodi-Bridge):
 - `hold_seconds` ist in QF gedeckelt (`QF_HOLD_SECONDS_MAX`, aktuell 3.0s).
 - Feed-only-Stale-Drops greifen erst nach `QF_STALE_FEED_DROP_SECONDS` (aktuell konservativ 180s),
   um kurzes `hit/no_hit`-Flackern zu vermeiden.
-- Fuer Skin-Labels kann `RadioMonitor.QF.Response.StationUsed` genutzt werden (tatsaechlich verwendeter Sender in ASM-QF).
-  - Hinweis: waehrend `pending` bleibt das Feld auf dem letzten terminalen Wert stabil.
-  - Bei der naechsten terminalen Response wird es mit dem effektiv verwendeten Sender aktualisiert.
+- ASM-QF liefert den effektiv verwendeten Sender in `RadioMonitor.QF.Response.Meta.station_used`.
+- ASM setzt daraus sein eigenes Label im ASM-Namespace fuer Skin-Anzeige.
 
 ## Quell-Details-Fenster: Sektionen
 
