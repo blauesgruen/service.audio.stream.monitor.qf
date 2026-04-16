@@ -29,7 +29,9 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Kodi-Label-Property `RadioMonitor.QF.Response.StationUsed` zeigt den tatsaechlich in ASM-QF verwendeten Sender
   - bleibt waehrend `pending` stabil auf dem letzten terminalen Wert
   - wird mit der naechsten terminalen Response aktualisiert (`hit|no_hit|blocked|aborted|error|timeout`)
-- Verified-Source-Fastpath prueft Quellen typgerecht (Stream via ICY, Feed via Feed-Probe)
+- Verified-Source-Fastpath prueft bekannte Quellen typgerecht zuerst (Stream via ICY, Feed via Feed-Probe)
+- Result-Cache ist nachrangiger Fallback; bei abweichendem frischem Fastpath-Paar wird Cache bewusst uebergangen
+- Vollkette (Lookup -> Resolve -> ICY -> Discovery) laeuft nur, wenn Fastpath und Result-Cache keinen Treffer liefern
 - QF-Parity mit begrenztem Hold (`QF_HOLD_SECONDS_MAX`) fuer stabile, aber schnelle Song-Ende-Erkennung
 - Konservatives Feed-Stale-Drop-Fenster (`QF_STALE_FEED_DROP_SECONDS`) gegen `hit/no_hit`-Flackern
 

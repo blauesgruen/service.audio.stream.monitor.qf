@@ -56,7 +56,9 @@ Wichtige Meldungen:
 - `Songabfrage fehlgeschlagen`: ICY aktuell nicht verwertbar; Discovery laeuft trotzdem weiter
 - `ASM-QF Request gesendet`: Request an die Kodi-Bridge wurde geschrieben
 - `event=request_result ... status=aborted`: ueberholter Request wurde deterministisch beendet
-- `event=result_cache_hit` / `reason=verified_source_fastpath`: schneller Treffer ohne volle Aufloesungskette
+- `reason=verified_source_fastpath`: schneller Treffer aus bekannter, verifizierter Quelle (ohne Vollkette)
+- `event=result_cache_hit`: schneller Treffer aus Result-Cache (nachrangiger Fallback)
+- `event=result_cache_bypassed_pair_changed`: Cache wurde bewusst uebergangen, weil ein frischer Fastpath-Hit ein anderes `artist/title`-Paar geliefert hat
 - `event=request_result ... status=error reason=resolver_exception`: Sendername/Quelle konnte in diesem Lauf nicht ausreichend aufgeloest werden
 
 Parity-Hinweise (Kodi-Bridge):

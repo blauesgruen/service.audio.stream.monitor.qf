@@ -109,6 +109,8 @@ Wichtige QF-Schalter:
 - Feed-Kandidaten werden einmal aufgebaut und dann bevorzugt abgefragt.
 - Bei ueberholten Requests schreibt `ASM-QF` explizit `status=aborted` (kein stiller Abbruchpfad).
 - Standardbetrieb: Supersede ist als Preflight aktiv (vor Start der Bearbeitung), Midflight-Supersede ist standardmaessig deaktiviert, um Abbruch-Kaskaden zu vermeiden.
+- Request-Ablauf in ASM-QF: erst `verified_source_fastpath`, dann `result_cache`; die Vollkette laeuft nur bei Doppel-Miss.
+- Wenn ein frischer Fastpath-Hit ein anderes `artist/title` liefert als der Cache, wird der Cache bewusst uebergangen (`result_cache_bypassed_pair_changed`).
 - Der effektive Hold ist auf `QF_HOLD_SECONDS_MAX` gedeckelt (auch wenn `QF_HOLD_SECONDS` hoeher gesetzt wird).
 - Feed-only-Stale-Drops greifen erst nach `QF_STALE_FEED_DROP_SECONDS`, um kurze Statusphasen nicht als Songende zu fehlinterpretieren.
 

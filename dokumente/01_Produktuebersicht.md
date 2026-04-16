@@ -24,7 +24,9 @@ Das Tool analysiert Internetradio-Streams mit Fokus auf drei Fragen:
 - Rohdaten-Detailansicht mit kompletter Nachvollziehbarkeit
 - Speicherung verifizierter Quellen in SQLite
 - Web-Fallback fuer Sendernamen mit mehreren Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`)
-- Kodi-Bridge (`ASM-QF`) mit Request/Response-Handshake, Ergebnis-Cache und typgerechtem Verified-Source-Fastpath (Stream vs Feed)
+- Kodi-Bridge (`ASM-QF`) mit Request/Response-Handshake, typgerechtem Verified-Source-Fastpath (Stream vs Feed) und nachrangigem Ergebnis-Cache
+- Bei abweichendem frischem Fastpath-Paar wird ein alter Result-Cache-Hit bewusst uebergangen
+- Die Vollkette (Lookup/Resolve/ICY/Discovery) laeuft nur, wenn Fastpath und Result-Cache keinen Treffer liefern
 - Deterministischer Abbruchpfad: bei ueberholten Requests schreibt `ASM-QF` eine Response mit `status=aborted`
 
 ## Wichtige Begriffe

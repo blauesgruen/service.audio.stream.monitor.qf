@@ -90,12 +90,13 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 
 ### Aktuelle Laufketten in `ASM-QF`
 
-- `result_cache_hit`: schneller Hit aus In-Memory-Result-Cache.
-- `resolution_cache_hit`: Sender-/Resolve-Daten aus In-Memory-Resolution-Cache.
-- `verified_source_fastpath`: verifizierte Quelle direkt pruefen.
+- `verified_source_fastpath`: verifizierte Quelle wird zuerst direkt geprueft.
   - Stream-Quelle -> ICY-Probe
   - Feed-Quelle -> Feed-Probe (`fetch_now_playing`)
-- Vollkette: Lookup -> Resolve -> ICY -> Discovery -> Policy/Parity-Entscheidung.
+- `result_cache_hit`: schneller In-Memory-Fallback, wenn Fastpath keinen Treffer liefert.
+- `result_cache_bypassed_pair_changed`: ein alter Cache-Hit wird bewusst verworfen, wenn ein frischer Fastpath ein anderes `artist/title`-Paar liefert.
+- `resolution_cache_hit`: Sender-/Resolve-Daten aus In-Memory-Resolution-Cache innerhalb der Vollkette.
+- Vollkette: Lookup -> Resolve -> ICY -> Discovery -> Policy/Parity-Entscheidung, nur bei Fastpath+Result-Cache-Miss.
 
 ### Parity-Entscheidung (Kodi-Bridge)
 
