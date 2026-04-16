@@ -120,6 +120,8 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_PHASE_TIMING_PRECISION = 3
         self.QF_RESULT_CACHE_ENABLED = True
         self.QF_RESULT_CACHE_TTL_SECONDS = 12
+        self.QF_RESULT_CACHE_USE_ONLY_ON_VERIFIED_SOURCE_MISS = True
+        self.QF_VERIFIED_PROBE_MISS_RETURNS_NO_HIT = True
         self.QF_STATION_KEY_NAME_FALLBACK_ENABLED = True
         self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS = 2
         self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES = 6
@@ -197,6 +199,8 @@ class QFBridgeService(xbmc.Monitor):
                 QF_PHASE_TIMING_PRECISION,
                 QF_RESULT_CACHE_ENABLED,
                 QF_RESULT_CACHE_TTL_SECONDS,
+                QF_RESULT_CACHE_USE_ONLY_ON_VERIFIED_SOURCE_MISS,
+                QF_VERIFIED_PROBE_MISS_RETURNS_NO_HIT,
                 QF_STALE_FEED_DROP_SECONDS,
                 QF_STATION_KEY_NAME_FALLBACK_ENABLED,
                 QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS,
@@ -261,6 +265,8 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_PHASE_TIMING_PRECISION = max(1, int(QF_PHASE_TIMING_PRECISION))
         self.QF_RESULT_CACHE_ENABLED = bool(QF_RESULT_CACHE_ENABLED)
         self.QF_RESULT_CACHE_TTL_SECONDS = max(0, int(QF_RESULT_CACHE_TTL_SECONDS))
+        self.QF_RESULT_CACHE_USE_ONLY_ON_VERIFIED_SOURCE_MISS = bool(QF_RESULT_CACHE_USE_ONLY_ON_VERIFIED_SOURCE_MISS)
+        self.QF_VERIFIED_PROBE_MISS_RETURNS_NO_HIT = bool(QF_VERIFIED_PROBE_MISS_RETURNS_NO_HIT)
         self.QF_STATION_KEY_NAME_FALLBACK_ENABLED = bool(QF_STATION_KEY_NAME_FALLBACK_ENABLED)
         self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS = max(1, int(QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS))
         self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES = max(1, int(QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES))
@@ -717,6 +723,59 @@ class QFBridgeService(xbmc.Monitor):
                 "verified_source_kind": candidate_kind,
             },
         }, f"hit_{candidate_kind}"
+
+    def _is_verified_probe_state(self, fastpath_state):
+        return str(fastpath_state or "").strip().lower().startswith("probe_")
+
+    def _build_verified_probe_no_hit_result(self, station_name_hint, fastpath_state):
+        state = str(fastpath_state or "").strip().lower()
+        probe_kind = ""
+        pair_state = "no_candidate"
+
+        if state.startswith("probe_feed_"):
+            probe_kind = "feed"
+            pair_state = state[len("probe_feed_") :]
+            if pair_state in {"empty", "rejected_missing_field"}:
+                pair_state = "missing_field"
+            elif pair_state.startswith("rejected_"):
+                pair_state = pair_state[len("rejected_") :]
+            if not pair_state:
+                pair_state = "no_candidate"
+        elif state.startswith("probe_stream_"):
+            probe_kind = "stream"
+            pair_state = state[len("probe_stream_") :]
+            if pair_state == "rejected_missing_field":
+                pair_state = "missing_field"
+            elif pair_state.startswith("rejected_"):
+                pair_state = pair_state[len("rejected_") :]
+            if not pair_state:
+                pair_state = "no_candidate"
+
+        meta = {
+            "station": station_name_hint,
+            "verified_fastpath_state": state,
+            "verified_fastpath_probe_kind": probe_kind,
+            "verified_fastpath_probe_only": True,
+        }
+        if probe_kind == "feed":
+            meta["feed_pair_state"] = pair_state
+            meta["stream_pair_state"] = "no_candidate"
+        elif probe_kind == "stream":
+            meta["stream_pair_state"] = pair_state
+            meta["feed_pair_state"] = "no_candidate"
+
+        reason = "generic_or_non_song"
+        if "error" in state:
+            reason = "verified_source_probe_error"
+
+        return {
+            "status": "no_hit",
+            "artist": "",
+            "title": "",
+            "source": "",
+            "reason": reason,
+            "meta": meta,
+        }
 
     def _get_cached_resolution(self, cache_key):
         if not cache_key:
@@ -1883,6 +1942,19 @@ class QFBridgeService(xbmc.Monitor):
                 station_key=station_key,
             )
             cached_result = self._get_cached_result(station_key)
+            fastpath_probe_state = self._is_verified_probe_state(fastpath_state)
+            allow_result_cache = True
+            if (
+                fastpath_probe_state
+                and self.QF_RESULT_CACHE_USE_ONLY_ON_VERIFIED_SOURCE_MISS
+            ):
+                allow_result_cache = False
+                if cached_result:
+                    self.logger.debug(
+                        "result_cache_bypassed_verified_probe_state",
+                        station_key=station_key,
+                        verified_fastpath_state=fastpath_state,
+                    )
 
             def _pair_from(result_obj):
                 artist = str((result_obj or {}).get("artist") or "").strip().lower()
@@ -1909,7 +1981,12 @@ class QFBridgeService(xbmc.Monitor):
                     else:
                         result_meta["result_cache_bypassed"] = "pair_unchanged"
                 result["meta"] = result_meta
-            elif cached_result:
+            elif fastpath_probe_state and self.QF_VERIFIED_PROBE_MISS_RETURNS_NO_HIT:
+                result = self._build_verified_probe_no_hit_result(
+                    station_name_hint=station_name,
+                    fastpath_state=fastpath_state,
+                )
+            elif cached_result and allow_result_cache:
                 cached_meta = dict((cached_result.get("meta") or {}))
                 cached_meta["result_cache_hit"] = True
                 cached_meta["verified_fastpath_state"] = fastpath_state
