@@ -28,8 +28,28 @@ from .models import ResolvedStream, SongInfo, StationMatch
 from .song_validation import is_valid_song_candidate
 from .utils import get_base_domain, is_mixed_alnum_token, is_probable_url, split_search_tokens
 
-TITLE_KEYS = {"title", "song", "track", "tracktitle", "songtitle", "songname", "trackname", "name"}
-ARTIST_KEYS = {"artist", "author", "interpret", "performer", "band", "artistname"}
+TITLE_KEYS = {
+    "title",
+    "song",
+    "track",
+    "tracktitle",
+    "songtitle",
+    "songname",
+    "trackname",
+    "name",
+    "song_title",
+    "song_now_title",
+}
+ARTIST_KEYS = {
+    "artist",
+    "author",
+    "interpret",
+    "performer",
+    "band",
+    "artistname",
+    "song_interpret",
+    "song_now_interpret",
+}
 STATUS_KEYS = {"status", "state", "playstate", "onair", "current", "isplaying"}
 TIME_KEYS = {"starttime", "start", "timestamp", "time", "date", "datetime"}
 DURATION_KEYS = {"duration", "length", "duration_sec", "duration_seconds", "runtime"}
@@ -309,6 +329,11 @@ class NowPlayingDiscoveryService:
             for br_slug in self._build_br_station_slugs(station, resolved):
                 seeds.append(self._build_br_radio_graphql_url(br_slug))
 
+        if self._is_ndr_context(base_domains, station, resolved):
+            for ndr_slug in self._build_ndr_station_slugs(station, resolved):
+                seeds.append(f"https://www.ndr.de/public/radioplaylists/{ndr_slug}.json")
+                seeds.append(f"https://ndr.de/public/radioplaylists/{ndr_slug}.json")
+
         deduped = []
         seen = set()
         for seed in seeds:
@@ -405,6 +430,61 @@ class NowPlayingDiscoveryService:
             "variables[stationSlug]": station_slug,
         }
         return "https://brradio.br.de/radio/v4?" + urlencode(params, doseq=True)
+
+    def _is_ndr_context(
+        self,
+        base_domains: set[str],
+        station: StationMatch | None,
+        resolved: ResolvedStream,
+    ) -> bool:
+        if "ndr.de" in base_domains:
+            return True
+        station_name = ((station.name if station else "") or resolved.station_name or "").strip().lower()
+        return station_name.startswith("ndr")
+
+    def _build_ndr_station_slugs(
+        self,
+        station: StationMatch | None,
+        resolved: ResolvedStream,
+    ) -> list[str]:
+        def compact(value: str) -> str:
+            text = (value or "").strip().lower()
+            if not text:
+                return ""
+            return re.sub(r"[^a-z0-9]+", "", text)
+
+        candidates = []
+        if station:
+            candidates.append(str(station.raw_record.get("slug") or ""))
+            candidates.append(station.name or "")
+            homepage = (station.homepage or "").strip()
+            if homepage:
+                parsed_home = urlparse(homepage)
+                for segment in parsed_home.path.split("/"):
+                    segment = segment.strip()
+                    if segment:
+                        candidates.append(segment)
+        candidates.append(resolved.station_name or "")
+
+        slugs: list[str] = []
+        seen = set()
+        for candidate in candidates:
+            slug = compact(candidate)
+            if not slug:
+                continue
+            if "ndr" not in slug:
+                continue
+            if len(slug) > 32:
+                continue
+            if slug.startswith("www"):
+                slug = slug[3:]
+            if slug.endswith("json"):
+                slug = slug[:-4]
+            if slug in seen:
+                continue
+            seen.add(slug)
+            slugs.append(slug)
+        return slugs[:6]
 
     def _extract_radio_directory_slug(self, homepage: str) -> str:
         parsed = urlparse((homepage or "").strip())
