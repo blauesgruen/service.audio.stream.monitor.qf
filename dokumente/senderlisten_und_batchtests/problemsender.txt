@@ -1,3 +1,8 @@
 RPR1.
 95.5 Charivari
+RPR1.,leer,resolve_error:Keinen passenden Sender gefunden für 'RPR1.'.,
+Radio 7,leer,resolve_error:Keinen passenden Sender gefunden für 'Radio 7'.,
+Charivari,leer,resolve_error:Keinen passenden Sender gefunden für 'Charivari'.,
+Radio Mainwelle,leer,resolve_error:Keinen passenden Sender gefunden für 'Radio Mainwelle'.,
+
 
