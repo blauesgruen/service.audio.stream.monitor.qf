@@ -21,6 +21,8 @@ from .config import (
     NOWPLAYING_DURATION_GRACE_SECONDS,
     NOWPLAYING_CANDIDATE_KEYWORDS,
     NOWPLAYING_QUERY_CONTEXT_IGNORE_TOKENS,
+    PROVIDER_BR_BASE_DOMAINS,
+    PROVIDER_NDR_BASE_DOMAINS,
     STATION_LOOKUP_OPTIONAL_PREFIX_TOKENS,
     USER_AGENT,
 )
@@ -325,11 +327,11 @@ class NowPlayingDiscoveryService:
             seeds.append(f"https://www.{base}/streams.json")
             seeds.append(f"https://{base}/streams.json")
 
-        if self._is_br_context(base_domains, station, resolved):
+        if self._is_br_context(base_domains):
             for br_slug in self._build_br_station_slugs(station, resolved):
                 seeds.append(self._build_br_radio_graphql_url(br_slug))
 
-        if self._is_ndr_context(base_domains, station, resolved):
+        if self._is_ndr_context(base_domains):
             for ndr_slug in self._build_ndr_station_slugs(station, resolved):
                 seeds.append(f"https://www.ndr.de/public/radioplaylists/{ndr_slug}.json")
                 seeds.append(f"https://ndr.de/public/radioplaylists/{ndr_slug}.json")
@@ -349,13 +351,8 @@ class NowPlayingDiscoveryService:
     def _is_br_context(
         self,
         base_domains: set[str],
-        station: StationMatch | None,
-        resolved: ResolvedStream,
     ) -> bool:
-        if "br.de" in base_domains or "brradio.br.de" in base_domains:
-            return True
-        station_name = ((station.name if station else "") or resolved.station_name or "").strip().lower()
-        return station_name.startswith("bayern") or station_name.startswith("b5 ")
+        return any(domain in base_domains for domain in PROVIDER_BR_BASE_DOMAINS)
 
     def _build_br_station_slugs(
         self,
@@ -434,13 +431,8 @@ class NowPlayingDiscoveryService:
     def _is_ndr_context(
         self,
         base_domains: set[str],
-        station: StationMatch | None,
-        resolved: ResolvedStream,
     ) -> bool:
-        if "ndr.de" in base_domains:
-            return True
-        station_name = ((station.name if station else "") or resolved.station_name or "").strip().lower()
-        return station_name.startswith("ndr")
+        return any(domain in base_domains for domain in PROVIDER_NDR_BASE_DOMAINS)
 
     def _build_ndr_station_slugs(
         self,
@@ -667,6 +659,7 @@ class NowPlayingDiscoveryService:
         path = parsed.path.lower()
         query = parsed.query.lower()
         haystack = f"{path}?{query}"
+        last_segment = path.rsplit("/", 1)[-1]
 
         has_html_hint = (
             path.endswith(".html")
@@ -724,7 +717,10 @@ class NowPlayingDiscoveryService:
                 "radiomodul",
             )
         )
+        has_plain_endpoint_path = bool(last_segment) and "." not in last_segment and not path.endswith("/")
         if has_html_hint and has_direct_nowplaying_path:
+            return True
+        if has_plain_endpoint_path and has_direct_nowplaying_path:
             return True
         return (has_html_hint or has_reload_hint) and has_reload_hint and has_nowplaying_hint
 
@@ -1355,6 +1351,19 @@ class NowPlayingDiscoveryService:
         if len(cells_raw) < 2:
             return "", ""
 
+        for cell_raw in cells_raw:
+            tagged_pair = re.search(
+                r"<b[^>]*>(?P<artist>.*?)</b>\s*(?:<br\s*/?>\s*)+(?P<title>.*?)\s*$",
+                cell_raw,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if not tagged_pair:
+                continue
+            artist = self._clean_html_text(tagged_pair.group("artist")).strip()
+            title = self._clean_html_text(tagged_pair.group("title")).strip()
+            if artist and title:
+                return artist, title
+
         cells = [self._clean_html_text(cell) for cell in cells_raw]
         cells = [cell for cell in cells if cell]
         if len(cells) < 2:
@@ -1487,6 +1496,19 @@ class NowPlayingDiscoveryService:
     ) -> bool:
         lower_url = (url or "").lower()
         parsed = urlparse(lower_url)
+        candidate_base = get_base_domain(url)
+        station_base = get_base_domain(station.homepage) if station and station.homepage else ""
+        stream_bases = {
+            base
+            for base in (
+                get_base_domain(resolved.resolved_url),
+                get_base_domain(resolved.delivery_url),
+                get_base_domain(resolved.input_url),
+            )
+            if base
+        }
+        same_station_domain = bool(candidate_base and station_base and candidate_base == station_base)
+        same_stream_domain = bool(candidate_base and candidate_base in stream_bases)
         if parsed.netloc == "brradio.br.de" and parsed.path == "/radio/v4":
             return True
         is_radiomodul = "radiomodul" in lower_url
@@ -1520,6 +1542,8 @@ class NowPlayingDiscoveryService:
             if len(station_name_overlap) >= 2:
                 pass
             elif combined_station_token and combined_station_token in candidate_tokens:
+                pass
+            elif same_station_domain or same_stream_domain:
                 pass
             else:
                 return False

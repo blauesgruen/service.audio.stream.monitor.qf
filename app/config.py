@@ -33,6 +33,16 @@ NON_ORIGIN_ASSET_BASE_DOMAINS = {
     "radio-assets.com",
 }
 
+PROVIDER_BR_BASE_DOMAINS = {
+    "br.de",
+    "brradio.br.de",
+    "rndfnk.com",
+}
+
+PROVIDER_NDR_BASE_DOMAINS = {
+    "ndr.de",
+}
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "radio_sources.db"
 
