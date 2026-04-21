@@ -117,6 +117,13 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED = True
         self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_ENABLED = True
         self.QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS = 1.2
+        self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_MIN_CONFIDENCE = 0.8
+        self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_REQUIRE_CONFIRMED = True
+        self.QF_VERIFIED_SOURCE_FEED_CONFIDENCE = 0.98
+        self.QF_VERIFIED_SOURCE_STREAM_CONFIDENCE = 0.72
+        self.QF_VERIFIED_SOURCE_STREAM_CONFIRM_HITS = 2
+        self.QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS = 180.0
+        self.QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT = True
         self.QF_PHASE_TIMING_PRECISION = 3
         self.QF_RESULT_CACHE_ENABLED = True
         self.QF_RESULT_CACHE_TTL_SECONDS = 12
@@ -219,6 +226,13 @@ class QFBridgeService(xbmc.Monitor):
                 QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED,
                 QF_VERIFIED_SOURCE_STREAM_FASTPATH_ENABLED,
                 QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS,
+                QF_VERIFIED_SOURCE_STREAM_FASTPATH_MIN_CONFIDENCE,
+                QF_VERIFIED_SOURCE_STREAM_FASTPATH_REQUIRE_CONFIRMED,
+                QF_VERIFIED_SOURCE_FEED_CONFIDENCE,
+                QF_VERIFIED_SOURCE_STREAM_CONFIDENCE,
+                QF_VERIFIED_SOURCE_STREAM_CONFIRM_HITS,
+                QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS,
+                QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT,
             )
             from app.metadata import SongMetadataFetcher
             from app.now_playing_discovery import NowPlayingDiscoveryService
@@ -262,6 +276,19 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED = bool(QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED)
         self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_ENABLED = bool(QF_VERIFIED_SOURCE_STREAM_FASTPATH_ENABLED)
         self.QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS = max(0.1, float(QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS))
+        self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_MIN_CONFIDENCE = max(
+            0.0, min(1.0, float(QF_VERIFIED_SOURCE_STREAM_FASTPATH_MIN_CONFIDENCE))
+        )
+        self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_REQUIRE_CONFIRMED = bool(
+            QF_VERIFIED_SOURCE_STREAM_FASTPATH_REQUIRE_CONFIRMED
+        )
+        self.QF_VERIFIED_SOURCE_FEED_CONFIDENCE = max(0.0, min(1.0, float(QF_VERIFIED_SOURCE_FEED_CONFIDENCE)))
+        self.QF_VERIFIED_SOURCE_STREAM_CONFIDENCE = max(0.0, min(1.0, float(QF_VERIFIED_SOURCE_STREAM_CONFIDENCE)))
+        self.QF_VERIFIED_SOURCE_STREAM_CONFIRM_HITS = max(1, int(QF_VERIFIED_SOURCE_STREAM_CONFIRM_HITS))
+        self.QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS = max(
+            10.0, float(QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS)
+        )
+        self.QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT = bool(QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT)
         self.QF_PHASE_TIMING_PRECISION = max(1, int(QF_PHASE_TIMING_PRECISION))
         self.QF_RESULT_CACHE_ENABLED = bool(QF_RESULT_CACHE_ENABLED)
         self.QF_RESULT_CACHE_TTL_SECONDS = max(0, int(QF_RESULT_CACHE_TTL_SECONDS))
@@ -684,6 +711,14 @@ class QFBridgeService(xbmc.Monitor):
             verified_source_url,
             meta=candidate_meta,
         )
+        candidate_confidence = float(candidate.get("confidence") or 0.0) if isinstance(candidate, dict) else 0.0
+        if candidate_kind == "stream":
+            if candidate_confidence < float(self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_MIN_CONFIDENCE):
+                return None, "stream_fastpath_low_confidence"
+            if self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_REQUIRE_CONFIRMED:
+                verification_policy = str(candidate_meta.get("verification_policy") or "").strip().lower()
+                if verification_policy != "stream_confirmed":
+                    return None, "stream_fastpath_unconfirmed"
 
         try:
             fast_song, probe_state = self._probe_verified_source_fastpath(
@@ -944,6 +979,128 @@ class QFBridgeService(xbmc.Monitor):
             """
         )
 
+    def _reset_stream_verify_state(self, state):
+        if not isinstance(state, dict):
+            return
+        state["stream_verify_pair_key"] = ""
+        state["stream_verify_count"] = 0
+        state["stream_verify_ts"] = 0.0
+
+    def _maybe_record_verified_source(
+        self,
+        *,
+        station_name,
+        station_input,
+        station_id,
+        station_key,
+        resolved,
+        song,
+        source_approval,
+    ):
+        if not song:
+            return False
+
+        source_kind_raw = str(song.source_kind or "").strip()
+        source_kind = source_kind_raw.lower()
+        is_feed_source = source_kind.startswith("web_feed_")
+        is_stream_source = source_kind.startswith("stream") or source_kind == "icy"
+        confidence = float(self.QF_VERIFIED_SOURCE_FEED_CONFIDENCE)
+        if is_stream_source:
+            confidence = float(self.QF_VERIFIED_SOURCE_STREAM_CONFIDENCE)
+
+        station_key_value = str(station_key or "").strip() or self._build_station_key(
+            station_name,
+            station_id=station_id,
+        )
+        station_state = self._get_station_state(station_key_value) if station_key_value else None
+        verification_policy = "immediate"
+
+        if is_feed_source and station_state:
+            self._reset_stream_verify_state(station_state)
+
+        if is_stream_source and station_state:
+            verification_policy = "stream_confirmation"
+            pair_key = (
+                f"{str(song.artist or '').strip().lower()}|{str(song.title or '').strip().lower()}"
+            )
+            now_ts = time.time()
+            prev_key = str(station_state.get("stream_verify_pair_key") or "")
+            prev_count = int(station_state.get("stream_verify_count") or 0)
+            prev_ts = float(station_state.get("stream_verify_ts") or 0.0)
+            confirm_window = float(self.QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS)
+            within_window = prev_ts > 0.0 and (now_ts - prev_ts) <= confirm_window
+            if pair_key and pair_key == prev_key and within_window:
+                verify_count = prev_count + 1
+            else:
+                verify_count = 1
+
+            station_state["stream_verify_pair_key"] = pair_key
+            station_state["stream_verify_count"] = verify_count
+            station_state["stream_verify_ts"] = now_ts
+            station_state["updated_ts"] = now_ts
+
+            required_hits = int(self.QF_VERIFIED_SOURCE_STREAM_CONFIRM_HITS)
+            if verify_count < required_hits:
+                self.logger.debug(
+                    "verified_source_stream_pending_confirmation",
+                    station_key=station_key_value,
+                    pair=pair_key,
+                    count=verify_count,
+                    required=required_hits,
+                    source_kind=source_kind,
+                )
+                return False
+
+            if self.QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT:
+                source_repo = self._get_verified_source_repository()
+                preferred_existing = None
+                if source_repo and station_key_value:
+                    preferred_existing = source_repo.get_preferred_source(
+                        station_key_value,
+                        max_age_seconds=int(self.QF_VERIFIED_SOURCE_MAX_AGE_SECONDS),
+                        allow_name_fallback=bool(self.QF_STATION_KEY_NAME_FALLBACK_ENABLED),
+                        min_name_tokens=int(self.QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS),
+                        max_name_candidates=int(self.QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES),
+                    )
+                if preferred_existing:
+                    existing_url = str(preferred_existing.get("source_url") or "").strip()
+                    existing_meta = preferred_existing.get("meta") if isinstance(preferred_existing, dict) else {}
+                    existing_kind = self._classify_verified_source_fastpath_kind(existing_url, meta=existing_meta)
+                    if existing_kind == "feed":
+                        self.logger.debug(
+                            "verified_source_stream_skipped_feed_preferred",
+                            station_key=station_key_value,
+                            stream_pair=pair_key,
+                            existing_source=existing_url,
+                        )
+                        self._reset_stream_verify_state(station_state)
+                        return False
+
+            verification_policy = "stream_confirmed"
+            self._reset_stream_verify_state(station_state)
+
+        resolved_url = resolved.resolved_url if resolved else ""
+        delivery_url = resolved.delivery_url if resolved else ""
+        verified_source_url = (song.source_url or "").strip() or resolved_url
+        if not verified_source_url:
+            return False
+
+        return self._record_verified_source(
+            station_name=station_name,
+            source_url=verified_source_url,
+            confidence=confidence,
+            station_id=station_id,
+            meta={
+                "station_input": station_input,
+                "station_id": station_id,
+                "source_approval": source_approval,
+                "source_kind_raw": source_kind_raw,
+                "resolved_url": resolved_url,
+                "delivery_url": delivery_url or "",
+                "verification_policy": verification_policy,
+            },
+        )
+
     def _record_verified_source(
         self,
         station_name,
@@ -1062,6 +1219,9 @@ class QFBridgeService(xbmc.Monitor):
             "last_reason": "",
             "last_no_hit_reason": "",
             "last_meta": {},
+            "stream_verify_pair_key": "",
+            "stream_verify_count": 0,
+            "stream_verify_ts": 0.0,
             "pending_hit_key": "",
             "pending_hit_count": 0,
             "pending_hit_ts": 0.0,
@@ -1594,7 +1754,7 @@ class QFBridgeService(xbmc.Monitor):
             station=station,
             stream_headers=stream_headers,
         )
-        probe_candidates = discovery.filter_official_html_candidates(feed_candidates, station) or feed_candidates
+        probe_candidates = discovery.prioritize_feed_candidates(feed_candidates, station) or feed_candidates
         feed_song = None
         feed_retry_attempts = int(self.QF_FEED_RETRY_ATTEMPTS)
         feed_retry_attempts = max(self.QF_FEED_RETRY_MIN_ATTEMPTS, feed_retry_attempts)
@@ -1649,20 +1809,14 @@ class QFBridgeService(xbmc.Monitor):
         if feed_song and feed_pair_state == "ok":
             allowed, approval = classify_source(feed_song.source_url)
             if allowed:
-                verified_source_url = (feed_song.source_url or "").strip() or resolved.resolved_url
-                self._record_verified_source(
+                self._maybe_record_verified_source(
                     station_name=station_name,
-                    source_url=verified_source_url,
-                    confidence=0.95,
+                    station_input=station_input,
                     station_id=station_id,
-                    meta={
-                        "station_input": station_input,
-                        "station_id": station_id,
-                        "source_approval": approval,
-                        "source_kind_raw": feed_song.source_kind,
-                        "resolved_url": resolved.resolved_url,
-                        "delivery_url": resolved.delivery_url or "",
-                    },
+                    station_key=station_key,
+                    resolved=resolved,
+                    song=feed_song,
+                    source_approval=approval,
                 )
                 return {
                     "status": "hit",
@@ -1711,20 +1865,14 @@ class QFBridgeService(xbmc.Monitor):
         if stream_song and stream_pair_state == "ok":
             allowed, approval = classify_source(stream_song.source_url)
             if allowed:
-                verified_source_url = (stream_song.source_url or "").strip() or resolved.resolved_url
-                self._record_verified_source(
+                self._maybe_record_verified_source(
                     station_name=station_name,
-                    source_url=verified_source_url,
-                    confidence=0.95,
+                    station_input=station_input,
                     station_id=station_id,
-                    meta={
-                        "station_input": station_input,
-                        "station_id": station_id,
-                        "source_approval": approval,
-                        "source_kind_raw": stream_song.source_kind,
-                        "resolved_url": resolved.resolved_url,
-                        "delivery_url": resolved.delivery_url or "",
-                    },
+                    station_key=station_key,
+                    resolved=resolved,
+                    song=stream_song,
+                    source_approval=approval,
                 )
                 return {
                     "status": "hit",

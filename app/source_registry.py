@@ -47,7 +47,7 @@ class VerifiedSourceRepository:
                     SELECT source_url, source_url_norm, confidence, last_seen_ts, verified_at_utc, meta_json
                     FROM verified_station_sources
                     WHERE station_key = ?
-                    ORDER BY last_seen_ts DESC, confidence DESC
+                    ORDER BY confidence DESC, last_seen_ts DESC
                     LIMIT 1
                     """,
                     (key,),
@@ -120,7 +120,7 @@ class VerifiedSourceRepository:
             SELECT source_url, source_url_norm, confidence, last_seen_ts, verified_at_utc, meta_json
             FROM verified_station_sources
             WHERE station_key LIKE ? OR ? LIKE station_key || ' %'
-            ORDER BY last_seen_ts DESC, confidence DESC
+            ORDER BY confidence DESC, last_seen_ts DESC
             LIMIT ?
             """,
             (like_prefix, station_key, max(1, int(max_name_candidates or 1))),
