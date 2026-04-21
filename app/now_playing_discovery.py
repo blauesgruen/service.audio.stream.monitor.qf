@@ -8,6 +8,7 @@ import re
 import ssl
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from urllib.error import URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
@@ -18,6 +19,9 @@ from .config import (
     DISCOVERY_READ_BYTES,
     DISCOVERY_REQUEST_TIMEOUT_SECONDS,
     MAX_NOWPLAYING_AGE_MINUTES,
+    NOWPLAYING_PARALLEL_BATCH_SIZE,
+    NOWPLAYING_PARALLEL_MAX_WORKERS,
+    NOWPLAYING_PARALLEL_PROBING_ENABLED,
     NOWPLAYING_DURATION_GRACE_SECONDS,
     NOWPLAYING_CANDIDATE_KEYWORDS,
     NOWPLAYING_QUERY_CONTEXT_IGNORE_TOKENS,
@@ -64,6 +68,9 @@ class NowPlayingDiscoveryService:
         self._log = log
         self._trusted_candidates: set[str] = set()
         self._linked_domains: set[str] = set()
+        self._parallel_prob_enabled = bool(NOWPLAYING_PARALLEL_PROBING_ENABLED)
+        self._parallel_max_workers = max(1, int(NOWPLAYING_PARALLEL_MAX_WORKERS))
+        self._parallel_batch_size = max(1, int(NOWPLAYING_PARALLEL_BATCH_SIZE))
 
     def is_trusted_candidate(self, url: str) -> bool:
         return url in self._trusted_candidates
@@ -99,6 +106,35 @@ class NowPlayingDiscoveryService:
                 merged.append(url)
             return merged
         return generic_html_matches
+
+    def prioritize_feed_candidates(
+        self,
+        candidate_urls: list[str],
+        station: StationMatch | None,
+    ) -> list[str]:
+        ordered = []
+        seen = set()
+
+        def _append(url: str):
+            if not url or url in seen:
+                return
+            seen.add(url)
+            ordered.append(url)
+
+        html_priority = self.filter_official_html_candidates(candidate_urls, station)
+        for url in html_priority:
+            _append(url)
+
+        for url in list(candidate_urls or []):
+            if url in seen:
+                continue
+            if self._is_strong_nowplaying_feed_url(url):
+                _append(url)
+
+        for url in list(candidate_urls or []):
+            _append(url)
+
+        return ordered
 
     def discover_candidate_urls(
         self,
@@ -236,42 +272,114 @@ class NowPlayingDiscoveryService:
         max_candidates: int = 0,
         max_elapsed_seconds: float = 0.0,
     ) -> SongInfo | None:
-        partial_match: SongInfo | None = None
-        started_at = time.time()
+        candidate_list = list(candidate_urls or [])
         limit = DISCOVERY_MAX_CANDIDATES
         if int(max_candidates or 0) > 0:
             limit = min(limit, int(max_candidates))
+        candidate_list = candidate_list[:limit]
+        if not candidate_list:
+            return None
 
-        for url in candidate_urls[:limit]:
-            if max_elapsed_seconds and (time.time() - started_at) > float(max_elapsed_seconds):
+        started_at = time.time()
+        if not self._parallel_prob_enabled or len(candidate_list) <= 1:
+            return self._fetch_now_playing_serial(candidate_list, station_name, started_at, max_elapsed_seconds)
+        return self._fetch_now_playing_parallel(candidate_list, station_name, started_at, max_elapsed_seconds)
+
+    def _probe_feed_candidate(self, url: str) -> SongInfo | None:
+        request_url = url if self._looks_like_html_nowplaying_endpoint(url) else self._cache_bust_url(url)
+        text, content_type = self._fetch_text(request_url)
+        if not text:
+            return None
+
+        song = None
+        if self._is_json_candidate(url, content_type, text):
+            song = self._parse_json_payload(text, url)
+        if not song:
+            song = self._parse_xml_payload(text, url)
+        if not song and self._looks_like_html_nowplaying_endpoint(url):
+            song = self._parse_html_payload(text, url)
+        return song
+
+    def _is_elapsed_limit_reached(self, started_at: float, max_elapsed_seconds: float) -> bool:
+        return bool(max_elapsed_seconds and (time.time() - started_at) > float(max_elapsed_seconds))
+
+    def _fetch_now_playing_serial(
+        self,
+        candidate_urls: list[str],
+        station_name: str,
+        started_at: float,
+        max_elapsed_seconds: float,
+    ) -> SongInfo | None:
+        partial_match: SongInfo | None = None
+        for url in candidate_urls:
+            if self._is_elapsed_limit_reached(started_at, max_elapsed_seconds):
                 break
-            request_url = url if self._looks_like_html_nowplaying_endpoint(url) else self._cache_bust_url(url)
-            text, content_type = self._fetch_text(request_url)
-            if not text:
-                continue
-
-            song = None
-            if self._is_json_candidate(url, content_type, text):
-                song = self._parse_json_payload(text, url)
-
-            if not song:
-                song = self._parse_xml_payload(text, url)
-
-            if not song and self._looks_like_html_nowplaying_endpoint(url):
-                song = self._parse_html_payload(text, url)
-
+            song = self._probe_feed_candidate(url)
             if not song:
                 continue
-
             if is_valid_song_candidate(song.artist, song.title, station_name=station_name):
                 self._log(f"Now-Playing Treffer aus Feed: {url}")
                 return song
-
             if not partial_match and (song.artist or song.title or song.stream_title):
                 partial_match = song
 
         if partial_match:
-            self._log(f"Now-Playing Fallback ohne vollständigen Artist+Title: {partial_match.source_url}")
+            self._log(f"Now-Playing Fallback ohne vollstaendigen Artist+Title: {partial_match.source_url}")
+        return partial_match
+
+    def _fetch_now_playing_parallel(
+        self,
+        candidate_urls: list[str],
+        station_name: str,
+        started_at: float,
+        max_elapsed_seconds: float,
+    ) -> SongInfo | None:
+        partial_match: SongInfo | None = None
+        batch_size = max(1, min(self._parallel_batch_size, self._parallel_max_workers, len(candidate_urls)))
+
+        for batch_start in range(0, len(candidate_urls), batch_size):
+            if self._is_elapsed_limit_reached(started_at, max_elapsed_seconds):
+                break
+
+            batch = candidate_urls[batch_start : batch_start + batch_size]
+            worker_count = max(1, min(self._parallel_max_workers, len(batch)))
+            batch_results: dict[int, SongInfo | None] = {}
+            next_idx = 0
+            pool = ThreadPoolExecutor(max_workers=worker_count)
+            shutdown_without_wait = False
+            try:
+                future_map = {
+                    pool.submit(self._probe_feed_candidate, url): idx for idx, url in enumerate(batch)
+                }
+                for future in as_completed(future_map):
+                    idx = future_map[future]
+                    try:
+                        batch_results[idx] = future.result()
+                    except Exception:
+                        batch_results[idx] = None
+
+                    while next_idx in batch_results:
+                        url = batch[next_idx]
+                        song = batch_results.pop(next_idx)
+                        next_idx += 1
+                        if not song:
+                            continue
+                        if is_valid_song_candidate(song.artist, song.title, station_name=station_name):
+                            self._log(f"Now-Playing Treffer aus Feed: {url}")
+                            shutdown_without_wait = True
+                            for pending in future_map:
+                                if not pending.done():
+                                    pending.cancel()
+                            pool.shutdown(wait=False)
+                            return song
+                        if not partial_match and (song.artist or song.title or song.stream_title):
+                            partial_match = song
+            finally:
+                if not shutdown_without_wait:
+                    pool.shutdown(wait=True)
+
+        if partial_match:
+            self._log(f"Now-Playing Fallback ohne vollstaendigen Artist+Title: {partial_match.source_url}")
         return partial_match
 
     def _build_seed_urls(
@@ -651,6 +759,35 @@ class NowPlayingDiscoveryService:
         if "metadata/channel/" in path and (path.endswith(".json") or path.endswith("/")):
             return True
         if self._looks_like_html_nowplaying_endpoint(url):
+            return True
+        return False
+
+    def _is_strong_nowplaying_feed_url(self, url: str) -> bool:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        query = parsed.query.lower()
+        path_query = f"{path}?{query}"
+        if "status-json.xsl" in path_query:
+            return True
+        if "currentsong" in path_query:
+            return True
+        if "output=xml" in path_query or "output=json" in path_query:
+            return True
+        if "format=xml" in path_query or "format=json" in path_query:
+            return True
+        if "/metadata/channel/" in path_query:
+            return True
+        if "/now_on_air" in path_query or "nowonair" in path_query:
+            return True
+        if "/playlist" in path_query or "titelliste" in path_query or "nowplaying" in path_query:
+            return True
+        if path.endswith(".json") and any(
+            token in path_query for token in ("song", "track", "current", "now", "playlist", "onair", "metadata")
+        ):
+            return True
+        if path.endswith(".xml") and any(
+            token in path_query for token in ("song", "track", "current", "now", "playlist", "onair", "metadata")
+        ):
             return True
         return False
 
@@ -2345,34 +2482,46 @@ class NowPlayingDiscoveryService:
         if base:
             self._linked_domains.add(base)
 
-    def _fetch_text(self, url: str) -> tuple[str, str]:
+    def _fetch_text_once(self, url: str, context=None) -> tuple[str, str]:
         request = Request(url, headers={"User-Agent": USER_AGENT})
+        with urlopen(request, timeout=DISCOVERY_REQUEST_TIMEOUT_SECONDS, context=context) as response:
+            content_type = response.headers.get("Content-Type") or ""
+            lower_type = content_type.lower()
+            if lower_type.startswith("audio/") or lower_type.startswith("video/"):
+                return "", content_type
+            payload = response.read(DISCOVERY_READ_BYTES)
+            return payload.decode("utf-8", errors="ignore"), content_type
+
+    def _http_fallback_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        if (parsed.scheme or "").lower() != "https":
+            return ""
+        return urlunparse(parsed._replace(scheme="http"))
+
+    def _fetch_text(self, url: str) -> tuple[str, str]:
         try:
-            with urlopen(request, timeout=DISCOVERY_REQUEST_TIMEOUT_SECONDS) as response:
-                content_type = response.headers.get("Content-Type") or ""
-                lower_type = content_type.lower()
-                if lower_type.startswith("audio/") or lower_type.startswith("video/"):
-                    return "", content_type
-                payload = response.read(DISCOVERY_READ_BYTES)
-                return payload.decode("utf-8", errors="ignore"), content_type
+            return self._fetch_text_once(url)
         except URLError as err:
             if isinstance(err.reason, ssl.SSLCertVerificationError):
                 # Best effort fallback for feeds with broken cert chains.
                 context = ssl._create_unverified_context()
                 try:
-                    with urlopen(
-                        request,
-                        timeout=DISCOVERY_REQUEST_TIMEOUT_SECONDS,
-                        context=context,
-                    ) as response:
-                        content_type = response.headers.get("Content-Type") or ""
-                        lower_type = content_type.lower()
-                        if lower_type.startswith("audio/") or lower_type.startswith("video/"):
-                            return "", content_type
-                        payload = response.read(DISCOVERY_READ_BYTES)
-                        return payload.decode("utf-8", errors="ignore"), content_type
+                    return self._fetch_text_once(url, context=context)
+                except Exception:
+                    pass
+            fallback_url = self._http_fallback_url(url)
+            if fallback_url:
+                try:
+                    return self._fetch_text_once(fallback_url)
                 except Exception:
                     return "", ""
             return "", ""
         except Exception:
+            fallback_url = self._http_fallback_url(url)
+            if fallback_url:
+                try:
+                    return self._fetch_text_once(fallback_url)
+                except Exception:
+                    return "", ""
             return "", ""
+

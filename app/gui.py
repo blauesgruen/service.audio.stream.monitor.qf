@@ -844,7 +844,9 @@ class RadioToolApp:
 
                 if feed_candidates:
                     probe_candidates = (
-                        official_html_feed_candidates if strict_webplayer_mode else feed_candidates
+                        now_playing_discovery.prioritize_feed_candidates(feed_candidates, station)
+                        if strict_webplayer_mode
+                        else feed_candidates
                     )
                     if preferred_feed_url and preferred_feed_url not in probe_candidates:
                         preferred_feed_url = ""
