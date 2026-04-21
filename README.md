@@ -11,6 +11,8 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Abruf der aktuellen Songinfo per ICY-Metadaten (`StreamTitle`)
 - Discovery laeuft auch weiter, wenn ICY keinen `StreamTitle` liefert
 - Bevorzugte Nutzung externer Feed-Quellen (`XML`/`JSON`/`HTML`) mit `artist/title`, falls auffindbar
+- Zentrale Feed-Priorisierung: offizielle HTML-Now-Playing-Kandidaten zuerst, danach starke strukturierte Feeds (`XML`/`JSON`), dann Rest
+- Feed-Probing kann parallel in Batches laufen (`NOWPLAYING_PARALLEL_*` in `app/config.py`)
 - Generische Icecast/Shoutcast-Statusquellen werden mitberuecksichtigt (`status-json.xsl`, `status.xsl`, `stats`)
 - Anzeige der tatsächlich genutzten Song-Quelle (`source_url`) im Quell-Details-Fenster
 - `Origin-only` aktiv mit optionaler `offizieller Player-Kette`:
@@ -28,6 +30,8 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Kodi-Bridge-Contract (`ASM <-> ASM-QF`): pro angenommenem Request genau eine Response (inkl. `aborted` bei superseded)
 - Der effektiv verwendete Sender wird von ASM-QF in `RadioMonitor.QF.Response.Meta` als `station_used` geliefert; ASM setzt daraus sein eigenes Label in ASM-Namespace
 - Verified-Source-Fastpath prueft bekannte Quellen typgerecht zuerst (Stream via ICY, Feed via Feed-Probe)
+- Stream-Fastpath ist zusaetzlich abgesichert (Mindest-Confidence + optional `verification_policy=stream_confirmed`)
+- Verified-Source-Persistenz priorisiert Feed-Qualitaet: Feed-Quellen erhalten hoehere Confidence; Stream-Quellen werden erst nach wiederholter Bestaetigung gespeichert
 - Result-Cache ist nachrangiger Fallback nur bei echtem `verified_source`-Miss; bei Fastpath-Probe-Miss (Feed/ICY ohne gueltiges Paar) wird Cache bewusst uebergangen
 - Bei Fastpath-Probe-Miss kann ASM-QF direkt `no_hit` aus der bekannten Quelle liefern, statt sofort die Vollkette zu starten
 - Vollkette (Lookup -> Resolve -> ICY -> Discovery) laeuft nur, wenn Fastpath und Result-Cache keinen Treffer liefern oder explizit erforderlich sind

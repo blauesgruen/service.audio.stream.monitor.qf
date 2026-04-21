@@ -60,6 +60,16 @@ Negativfilter:
 - Template-URLs mit `${...}`
 - irrelevante technische Endpunkte ohne Songbezug
 
+## Kandidaten-Priorisierung vor dem Polling
+
+Nach dem Ranking werden Kandidaten fuer den Abruf nochmals zentral priorisiert:
+
+1. Offizielle HTML-Now-Playing-Kandidaten (domainnah zum Sender)
+2. Starke strukturierte Feed-URLs (vor allem `XML`/`JSON`)
+3. Restliche Kandidaten
+
+Damit bleiben klassische Player-Seiten sichtbar, ohne strukturierte Feeds zu verdraengen.
+
 ## Stream-Key-Erkennung
 
 Fuer Plattformen mit Kanal-Keys (z. B. Stream-Plattformen) werden Keys generisch extrahiert:
@@ -136,6 +146,17 @@ Wichtig:
 
 - Wenn ICY im aktuellen Zyklus keinen verwertbaren Song liefert, wird die Feed-Discovery trotzdem weiter ausgefuehrt.
 
+## Paralleles Feed-Probing
+
+`fetch_now_playing` kann Kandidaten parallel in Batches pruefen.
+
+- Konfiguration ueber:
+  - `NOWPLAYING_PARALLEL_PROBING_ENABLED`
+  - `NOWPLAYING_PARALLEL_MAX_WORKERS`
+  - `NOWPLAYING_PARALLEL_BATCH_SIZE`
+- Trefferreihenfolge bleibt stabil zur priorisierten Kandidatenliste.
+- Bei erstem gueltigen `artist/title`-Treffer wird der Poll-Zyklus frueh beendet.
+
 ## Verified-Source-Fastpath (Kodi-Bridge)
 
 Wenn bereits eine verifizierte Quelle fuer den Sender vorliegt, wird diese bevorzugt direkt geprueft:
@@ -145,11 +166,24 @@ Wenn bereits eine verifizierte Quelle fuer den Sender vorliegt, wird diese bevor
 
 Wichtig fuer Fastpath-Bewertung:
 
-- ICY- und Feed-Treffer werden im Fastpath gleichwertig behandelt (beide koennen den finalen Hit direkt liefern).
+- Feed- und Stream-Treffer koennen den finalen Hit liefern, Stream-Fastpath hat aber zusaetzliche Schutzregeln.
+- Stream-Fastpath erfordert konfigurierbar:
+  - Mindest-Confidence (`QF_VERIFIED_SOURCE_STREAM_FASTPATH_MIN_CONFIDENCE`)
+  - optional bestaetigte Verifikation (`QF_VERIFIED_SOURCE_STREAM_FASTPATH_REQUIRE_CONFIRMED`)
 - Wenn eine verifizierte Quelle geprobt wurde, aber aktuell kein gueltiges Paar liefert, wird ein alter `result_cache`-Treffer nicht blind weiterverwendet.
 - In diesem Fall kann der Fastpath direkt `no_hit` liefern (`verified_fastpath_probe_only`), damit Songwechsel nicht durch stale Cache-Hits maskiert werden.
 
 Dadurch werden unnoetige Voll-Discovery-Laeufe reduziert.
+
+## Verified-Source-Persistenz (Feed vor Stream)
+
+Beim Speichern verifizierter Quellen gilt:
+
+- Feed-Quellen werden mit hoher Confidence gespeichert.
+- Stream-Quellen werden erst nach wiederholter gleicher Paar-Bestaetigung gespeichert
+  (`QF_VERIFIED_SOURCE_STREAM_CONFIRM_HITS` innerhalb `QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS`).
+- Optional wird Stream-Persistenz unterdrueckt, wenn bereits eine Feed-Quelle fuer die Station bevorzugt ist
+  (`QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT`).
 
 ## QF-Parity gegen Flackern (Kodi)
 

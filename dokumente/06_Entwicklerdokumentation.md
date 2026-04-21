@@ -42,8 +42,9 @@ Der kritische Pfad liegt in `RadioToolApp._scan_worker()`:
 5. Polling-Loop:
    - ICY lesen
    - Feed-Kandidaten entdecken (einmal)
-   - Feed pollen
-   - Song auswählen
+   - Feed-Kandidaten priorisieren
+   - Feed pollen (seriell oder parallel, konfigurierbar)
+   - Song auswaehlen
    - Songwechsel/Songende erkennen
 
 Hinweis:
@@ -124,6 +125,7 @@ Wichtig:
 Oeffentliche Methoden:
 
 - `discover_candidate_urls(resolved, station, stream_headers) -> list[str]`
+- `prioritize_feed_candidates(candidate_urls, station) -> list[str]`
 - `fetch_now_playing(candidate_urls) -> SongInfo | None`
 - `is_trusted_candidate(url) -> bool`
 - `get_linked_domains() -> set[str]`
@@ -132,9 +134,12 @@ Wichtig:
 
 - keine sender-spezifischen hardcodes
 - Candidate Ranking + Filter + Key-Injection
+- zentrale Kandidaten-Priorisierung (offizielle HTML-Kandidaten zuerst, danach starke strukturierte Feeds)
+- `fetch_now_playing` nutzt je nach Konfiguration serielle oder parallele Batch-Probes (`NOWPLAYING_PARALLEL_*`)
 - zusaetzliche generische Status-Seed-Endpunkte (`status-json.xsl`, `status.xsl`, `stats`)
 - Frischelogik ueber `MAX_NOWPLAYING_AGE_MINUTES`
 - zusaetzlich Dauerfenster pruefung ueber `starttime + duration + NOWPLAYING_DURATION_GRACE_SECONDS`
+- HTTP-Transport mit Best-Effort-Fallback (`https` -> unverified SSL bei Cert-Fehler -> optional `http`)
 - `trusted` markiert Discovery-Quellen aus offizieller Player-Kette; nur mit `ALLOW_OFFICIAL_CHAIN_SOURCES=True` zusaetzlich erlaubt
 - zusaetzliche generische Player-Config-Extraktion (`data-mandate` + `webradio.js` -> `config.json` -> `currentUrl`/`playlistUrl`)
 
@@ -272,12 +277,21 @@ Semantik `StationUsed`:
 Request-Entscheidungsreihenfolge (`_handle_request`):
 
 - Zuerst wird der `verified_source_fastpath` geprueft (bekannte verifizierte Quelle, typgerecht Stream/Feed).
+- Stream-Fastpath wird nur akzeptiert, wenn Confidence und Verifikations-Policy die Guard-Rails erfuellen (`QF_VERIFIED_SOURCE_STREAM_FASTPATH_MIN_CONFIDENCE`, optional `...REQUIRE_CONFIRMED`).
 - Danach folgt optional `result_cache_hit` als schneller Fallback bei echtem `verified_source`-Miss.
 - Wenn ein frischer Fastpath-Hit ein anderes `artist/title` liefert als der Cache, wird der Cache bewusst uebergangen (`event=result_cache_bypassed_pair_changed`).
 - Wenn eine verifizierte Quelle geprobt wurde, aber aktuell kein gueltiges Paar liefert, wird ein Cache-Hit ebenfalls bewusst verworfen (`event=result_cache_bypassed_verified_probe_state`).
 - Bei Probe-Miss kann ASM-QF direkt `no_hit` aus dem bekannten Fastpath-Pfad liefern (`meta.verified_fastpath_probe_only=true`), ohne sofort die Vollkette zu starten.
 - Die Vollkette (`_resolve_song`) laeuft nur bei Fastpath/Cache-Miss oder wenn der Fastpath-Zweig keinen finalen Zustand liefern kann.
 - Intern kann `_resolve_song(..., skip_verified_fastpath=True)` genutzt werden, um doppelte Fastpath-Probes in derselben Request-Verarbeitung zu vermeiden.
+
+Persistenzregel fuer verifizierte Quellen:
+
+- Feed-Quellen werden sofort mit hoher Confidence gespeichert.
+- Stream-Quellen werden erst nach wiederholter Paar-Bestaetigung gespeichert
+  (`QF_VERIFIED_SOURCE_STREAM_CONFIRM_HITS` innerhalb `QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS`).
+- Optional wird Stream-Persistenz unterdrueckt, wenn bereits eine Feed-Quelle bevorzugt ist
+  (`QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT`).
 
 ### Verbindliche Regel
 
@@ -363,7 +377,7 @@ Manueller Funktionstest:
 4. Ein Sender mit XML-Quelle
 5. Speichern in DB und SQL-Check
 
-## Konventionen fuer künftige Aenderungen
+## Konventionen fuer kuenftige Aenderungen
 
 - Kein station-spezifischer Hardcode.
 - Neue Grenzwerte nur in `config.py`.

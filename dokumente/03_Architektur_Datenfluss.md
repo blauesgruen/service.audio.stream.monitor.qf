@@ -45,10 +45,15 @@ Events, die vom Worker an die UI geschickt werden:
 - `station`
 - `resolved`
 - `song`
+- `song_cleared`
+- `song_state`
 - `epg`
+- `epg_disabled`
 - `feed_candidates`
 - `origin_domains`
 - `error`
+- `batch_progress`
+- `batch_done`
 - `done`
 
 Die UI aktualisiert damit gezielt einzelne Felder.
@@ -70,7 +75,7 @@ Die UI aktualisiert damit gezielt einzelne Felder.
    - zusaetzlich typische Icecast/Shoutcast-Statuspfade pruefen (`status-json.xsl`, `status.xsl`, `stats`)
    - Kandidaten ranken und begrenzen
 6. `NowPlayingDiscoveryService.fetch_now_playing()`
-   - XML/JSON Kandidaten abrufen
+   - XML/JSON/HTML Kandidaten abrufen (seriell oder parallel in Batches)
    - bestes `artist/title` ermitteln
 7. Auswahl des finalen Songs
    - Feed-Song wird bevorzugt, wenn eindeutig und erlaubt
@@ -93,12 +98,14 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - `verified_source_fastpath`: verifizierte Quelle wird zuerst direkt geprueft.
   - Stream-Quelle -> ICY-Probe
   - Feed-Quelle -> Feed-Probe (`fetch_now_playing`)
+  - Stream-Fastpath ist zusaetzlich durch Mindest-Confidence und optionalen `stream_confirmed`-Nachweis abgesichert.
 - `result_cache_hit`: schneller In-Memory-Fallback nur bei echtem Fastpath-Miss ohne Probe-Treffer (`fastpath_state=miss`).
 - `result_cache_bypassed_verified_probe_state`: ein alter Cache-Hit wird verworfen, wenn die verifizierte Quelle zwar geprobt wurde, aber aktuell kein gueltiges Paar liefert.
 - `result_cache_bypassed_pair_changed`: ein alter Cache-Hit wird bewusst verworfen, wenn ein frischer Fastpath ein anderes `artist/title`-Paar liefert.
 - `resolution_cache_hit`: Sender-/Resolve-Daten aus In-Memory-Resolution-Cache innerhalb der Vollkette.
 - Bei Probe-Miss der verifizierten Quelle kann direkt `no_hit` aus dem Fastpath-Zweig geliefert werden (ohne sofortige Vollkette).
 - Vollkette: Lookup -> Resolve -> ICY -> Discovery -> Policy/Parity-Entscheidung, nur wenn Fastpath/Cache keinen verwertbaren Zustand liefern.
+- Discovery priorisiert Kandidaten zentral: offizielle HTML-Now-Playing-Kandidaten zuerst, danach starke strukturierte Feed-URLs, dann Rest.
 
 ### Parity-Entscheidung (Kodi-Bridge)
 
