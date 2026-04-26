@@ -48,6 +48,8 @@ TITLE_KEYS = {
 }
 ARTIST_KEYS = {
     "artist",
+    "artistcredits",
+    "artist_credit",
     "author",
     "interpret",
     "performer",
@@ -57,7 +59,18 @@ ARTIST_KEYS = {
     "song_now_interpret",
 }
 STATUS_KEYS = {"status", "state", "playstate", "onair", "current", "isplaying"}
-TIME_KEYS = {"starttime", "start", "timestamp", "time", "date", "datetime"}
+TIME_KEYS = {
+    "starttime",
+    "start",
+    "timestamp",
+    "time",
+    "date",
+    "datetime",
+    "lastupdated",
+    "updated",
+    "updatedat",
+    "updated_at",
+}
 DURATION_KEYS = {"duration", "length", "duration_sec", "duration_seconds", "runtime"}
 HTML_TITLE_CLASS_KEYS = ("js_title", "songtitle", "tracktitle", "title", "titel", "track", "song", "songname", "trackname")
 HTML_ARTIST_CLASS_KEYS = ("js_artist", "interpret", "artist", "artistname", "performer", "band", "author")
@@ -706,6 +719,10 @@ class NowPlayingDiscoveryService:
             return False
         if "form_action_url=" in lower_url:
             return False
+        if "well-known" in path:
+            return False
+        if any(token in path for token in ("current-track", "current_track", "currenttrack")):
+            return True
 
         if "avcustom" in path:
             return any(hint in path for hint in ("live", "stream", "radio", "onair"))
@@ -748,7 +765,12 @@ class NowPlayingDiscoveryService:
             or "format=xml" in query
             or "format=json" in query
         )
-        has_api_hint = "api" in path or "scripts" in path or parsed.netloc.lower().startswith("api.")
+        has_api_hint = (
+            "api" in path
+            or "scripts" in path
+            or parsed.netloc.lower().startswith("api.")
+            or ".api." in parsed.netloc.lower()
+        )
 
         if has_feed_ext and (has_keyword or strong_api_keyword):
             return True
@@ -767,6 +789,8 @@ class NowPlayingDiscoveryService:
         path = parsed.path.lower()
         query = parsed.query.lower()
         path_query = f"{path}?{query}"
+        if "current-track" in path_query or "current_track" in path_query:
+            return True
         if "status-json.xsl" in path_query:
             return True
         if "currentsong" in path_query:
@@ -918,6 +942,8 @@ class NowPlayingDiscoveryService:
             score -= 10
         if "/current/" in path_query and path.endswith(".json"):
             score += 60
+        if "current-track" in path_query or "current_track" in path_query:
+            score += 55
         if "output=xml" in path_query or "output=json" in path_query:
             score += 25
         if "currentsong" in path_query:
@@ -1054,6 +1080,39 @@ class NowPlayingDiscoveryService:
         if br_candidates:
             candidates.extend(br_candidates)
         else:
+            if isinstance(data, dict):
+                for key in ("trackInfo", "currentTrack", "nowPlaying"):
+                    node = data.get(key)
+                    if not isinstance(node, dict):
+                        continue
+                    title = self._extract_json_value(node, TITLE_KEYS)
+                    artist = self._extract_artist_from_node(node)
+                    if title and not artist:
+                        split_artist, split_title = self._split_compound_title(title)
+                        if split_artist and split_title:
+                            artist = split_artist
+                            title = split_title
+                    time_text = self._extract_json_value(data, TIME_KEYS) or self._extract_json_value(node, TIME_KEYS)
+                    duration_text = self._extract_json_value(node, DURATION_KEYS)
+                    if not title and not artist:
+                        continue
+                    score = 0
+                    if title:
+                        score += 10
+                    if artist:
+                        score += 8
+                    if key.lower() in {"trackinfo", "currenttrack", "nowplaying"}:
+                        score += 30
+                    age_minutes = self._age_minutes(time_text)
+                    if age_minutes is not None:
+                        if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
+                            score -= 120
+                        else:
+                            score += 20
+                    if self._is_duration_window_expired(time_text, duration_text):
+                        score -= 120
+                    candidates.append((score, artist, title, time_text, duration_text, age_minutes))
+
             for node in self._walk_json_objects(data):
                 title = self._extract_json_value(node, TITLE_KEYS)
                 artist = self._extract_artist_from_node(node)
@@ -1988,7 +2047,58 @@ class NowPlayingDiscoveryService:
             elif self._looks_like_feed_url(cleaned_base):
                 generated.add(cleaned_base)
 
+        channel_sources = set(known_candidates)
+        for doc_url, text in documents:
+            if doc_url:
+                channel_sources.add(doc_url)
+            if not text:
+                continue
+            for extracted in self._extract_urls_from_document(text, doc_url):
+                channel_sources.add(extracted)
+        for url in self._extract_channel_current_track_urls(channel_sources):
+            if self._looks_like_feed_url(url):
+                generated.add(url)
+
         return generated
+
+    def _extract_channel_current_track_urls(self, urls: set[str]) -> set[str]:
+        candidates = set()
+        for raw_url in urls:
+            url = str(raw_url or "").strip()
+            if not url:
+                continue
+            parsed = urlparse(url)
+            if not parsed.scheme or not parsed.netloc:
+                continue
+            parts = [part for part in parsed.path.split("/") if part]
+            lowered_parts = [part.lower() for part in parts]
+            if "channels" not in lowered_parts:
+                continue
+            idx = lowered_parts.index("channels")
+            if idx + 1 >= len(parts):
+                continue
+            channel_id = parts[idx + 1].strip()
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{2,80}", channel_id):
+                continue
+            trailing_parts = lowered_parts[idx + 2 :]
+            has_stream_like_tail = any(
+                ("stream" in part) or ("guide" in part) or ("current-track" in part) or ("current_track" in part)
+                for part in trailing_parts
+            )
+            if not has_stream_like_tail:
+                continue
+
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            candidates.add(f"{base}/channels/{channel_id}/current-track")
+
+            query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+            source_host = str(query.get("source") or "").strip()
+            if source_host:
+                source_host = re.sub(r"^https?://", "", source_host, flags=re.IGNORECASE).strip("/")
+                if re.fullmatch(r"[A-Za-z0-9.-]+", source_host) and "." in source_host:
+                    candidates.add(f"https://{source_host}/channels/{channel_id}/current-track")
+
+        return candidates
 
     def _discover_official_player_feed_urls(
         self,
