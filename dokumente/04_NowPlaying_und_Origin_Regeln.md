@@ -40,6 +40,7 @@ Aus Seeds werden Inhalte geholt und nach URLs durchsucht:
 - relative `href/src/data-*`
 - XML/JSON-Pfade
 - Script-Assets (`.js`) auf gleicher Basisdomain
+- verschachtelte Script-Bundles auf derselben Basisdomain, wenn dort Feed- oder weitere Script-URLs dynamisch zusammengesetzt werden
 
 Zusatzlogik:
 
@@ -115,6 +116,7 @@ Weiterhin ausgeschlossen:
 - rekursiver Walk durch Objekte/Listen
 - extrahiert analoge Feldnamen (`title/song/track`, `artist/author/interpret`, etc.)
 - Statusfelder analog zu XML
+- bevorzugt bei Listen-Feeds aktive Eintraege ueber Zeitfenster (`starttime + duration`) und Zustandsfelder wie `playingMode` statt blind den ersten Listeneintrag zu nehmen
 
 ### HTML
 
@@ -128,8 +130,9 @@ Es gibt zwei Ebenen:
 1. Altersgrenze (`MAX_NOWPLAYING_AGE_MINUTES`)
 2. Dauerfenster-Pruefung:
    - wenn `starttime` und `duration` vorhanden sind,
-   - wird geprueft, ob `jetzt > start + duration + grace`
+   - wird geprueft, ob der Eintrag aktuell aktiv, schon abgelaufen oder noch zukuenftig ist
    - ueberzogene Eintraege werden verworfen
+   - aktive Eintraege werden bei JSON-Listen deutlich bevorzugt
 
 Damit werden veraltete "now"-Eintraege schneller ausgesiebt, ohne sender-spezifischen Code.
 
@@ -215,6 +218,7 @@ Wenn eine Seite `data-mandate` + `webradio.js` enthaelt, wird zusaetzlich versuc
 1. `.../webradio/<mandate>/config.json` laden
 2. passenden Channel (Name/ID/Stream-Match) bestimmen
 3. `currentUrl`/`playlistUrl` als Song-Feed-Kandidaten nutzen
+4. falls ein Player seine Feed-URL erst in Script-Bundles zusammensetzt, werden relative Script- und Feed-Pfade derselben Domain nachverfolgt
 
 ## Songwechsel- und Songende-Erkennung
 
@@ -243,3 +247,6 @@ Damit werden reine Webradio-Streams haeufig robuster gefunden, ohne sender-spezi
 - Ohne eindeutige Tokens in Quelle bleibt nur best-effort.
 
 Der Ansatz bleibt trotzdem robust, weil er mehrere Quellen parallel bewertet und nur eindeutige Daten akzeptiert.
+
+
+

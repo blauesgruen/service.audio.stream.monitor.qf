@@ -134,11 +134,13 @@ Wichtig:
 
 - keine sender-spezifischen hardcodes
 - Candidate Ranking + Filter + Key-Injection
+- verfolgt bei Bedarf priorisierte Script-Bundles derselben Domain bis zu dynamisch zusammengesetzten Feed-URLs
 - zentrale Kandidaten-Priorisierung (offizielle HTML-Kandidaten zuerst, danach starke strukturierte Feeds)
 - `fetch_now_playing` nutzt je nach Konfiguration serielle oder parallele Batch-Probes (`NOWPLAYING_PARALLEL_*`)
 - zusaetzliche generische Status-Seed-Endpunkte (`status-json.xsl`, `status.xsl`, `stats`)
 - Frischelogik ueber `MAX_NOWPLAYING_AGE_MINUTES`
 - zusaetzlich Dauerfenster pruefung ueber `starttime + duration + NOWPLAYING_DURATION_GRACE_SECONDS`
+- JSON-Kandidaten werden nicht nur nach `artist/title`, sondern auch nach aktivem Zeitfenster und Zustandsfeldern wie `playingMode` gescored
 - HTTP-Transport mit Best-Effort-Fallback (`https` -> unverified SSL bei Cert-Fehler -> optional `http`)
 - `trusted` markiert Discovery-Quellen aus offizieller Player-Kette; nur mit `ALLOW_OFFICIAL_CHAIN_SOURCES=True` zusaetzlich erlaubt
 - zusaetzliche generische Player-Config-Extraktion (`data-mandate` + `webradio.js` -> `config.json` -> `currentUrl`/`playlistUrl`)
@@ -398,3 +400,5 @@ Manueller Funktionstest:
 - `app/config.py`
 - `app/utils.py`
 - `app/live_logger.py`
+
+

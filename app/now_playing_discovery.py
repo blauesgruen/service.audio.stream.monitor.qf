@@ -162,7 +162,7 @@ class NowPlayingDiscoveryService:
         candidates = set()
         visited_pages = set()
         discovery_page_budget = 4
-        script_fetch_budget = 2
+        script_fetch_budget = 6
         seed_documents: list[tuple[str, str]] = []
 
         for seed in seeds:
@@ -179,7 +179,8 @@ class NowPlayingDiscoveryService:
                 continue
 
             seed_documents.append((seed, text))
-            for extracted in self._extract_urls_from_document(text, seed):
+            extracted_urls = self._extract_urls_from_document(text, seed)
+            for extracted in extracted_urls:
                 if self._looks_like_feed_url(extracted):
                     candidates.add(extracted)
                     self._mark_trusted_candidate(extracted)
@@ -211,22 +212,33 @@ class NowPlayingDiscoveryService:
                             candidates.add(nested)
                             self._mark_trusted_candidate(nested)
 
-                if (
-                    script_fetch_budget > 0
-                    and self._looks_like_script_asset(extracted)
-                    and get_base_domain(extracted) == get_base_domain(seed)
-                    and extracted not in visited_pages
-                ):
-                    visited_pages.add(extracted)
-                    script_fetch_budget -= 1
-                    script_text, _ = self._fetch_text(extracted)
-                    if not script_text:
+            for script_url in self._prioritize_script_asset_urls(extracted_urls, seed):
+                if script_fetch_budget <= 0 or script_url in visited_pages:
+                    continue
+                visited_pages.add(script_url)
+                script_fetch_budget -= 1
+                script_text, _ = self._fetch_text(script_url)
+                if not script_text:
+                    continue
+                seed_documents.append((script_url, script_text))
+                nested_urls = self._extract_urls_from_document(script_text, script_url)
+                for nested in nested_urls:
+                    if self._looks_like_feed_url(nested):
+                        candidates.add(nested)
+                        self._mark_trusted_candidate(nested)
+                for nested_script_url in self._prioritize_script_asset_urls(nested_urls, seed):
+                    if script_fetch_budget <= 0 or nested_script_url in visited_pages:
                         continue
-                    seed_documents.append((extracted, script_text))
-                    for nested in self._extract_urls_from_document(script_text, extracted):
-                        if self._looks_like_feed_url(nested):
-                            candidates.add(nested)
-                            self._mark_trusted_candidate(nested)
+                    visited_pages.add(nested_script_url)
+                    script_fetch_budget -= 1
+                    nested_script_text, _ = self._fetch_text(nested_script_url)
+                    if not nested_script_text:
+                        continue
+                    seed_documents.append((nested_script_url, nested_script_text))
+                    for extracted_nested_feed in self._extract_urls_from_document(nested_script_text, nested_script_url):
+                        if self._looks_like_feed_url(extracted_nested_feed):
+                            candidates.add(extracted_nested_feed)
+                            self._mark_trusted_candidate(extracted_nested_feed)
 
         generated = self._build_generated_candidates(seed_documents, candidates, resolved, station)
         for generated_url in generated:
@@ -633,21 +645,33 @@ class NowPlayingDiscoveryService:
             .replace("\\u003a", ":")
             .replace("\\u003A", ":")
         )
-        urls = set()
+        urls: list[str] = []
+        seen_urls = set()
+
+        def _remember(raw_url: str) -> None:
+            normalized = html.unescape(str(raw_url or "").strip())
+            if not normalized:
+                return
+            if not is_probable_url(normalized):
+                return
+            if normalized in seen_urls:
+                return
+            seen_urls.add(normalized)
+            urls.append(normalized)
 
         for match in re.findall(r"https?://[^\"'`\s<>()]+", normalized_text, flags=re.IGNORECASE):
-            urls.add(match)
+            _remember(match)
 
         for match in re.findall(r"(?:href|src|data-[a-z0-9_-]+)=[\"']([^\"']+)[\"']", normalized_text, flags=re.IGNORECASE):
             if match.startswith("javascript:"):
                 continue
             if match.startswith("www."):
-                urls.add(f"https://{match}")
+                _remember(f"https://{match}")
             elif match.startswith("//"):
                 base_scheme = urlparse(base_url).scheme or "https"
-                urls.add(f"{base_scheme}:{match}")
+                _remember(f"{base_scheme}:{match}")
             else:
-                urls.add(urljoin(base_url, match))
+                _remember(urljoin(base_url, match))
 
         for match in re.findall(
             r"/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+(?:\.xml|\.json)(?:\?[^\"'\s<>()]+)?",
@@ -655,9 +679,9 @@ class NowPlayingDiscoveryService:
             flags=re.IGNORECASE,
         ):
             if match.startswith("/www."):
-                urls.add(f"https://{match.lstrip('/')}")
+                _remember(f"https://{match.lstrip('/')}")
             else:
-                urls.add(urljoin(base_url, match))
+                _remember(urljoin(base_url, match))
 
         for match in re.findall(
             r"/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+(?:\.html|\.htm)(?:\?[^\"'\s<>()]+)?",
@@ -682,30 +706,82 @@ class NowPlayingDiscoveryService:
             ):
                 continue
             if match.startswith("/www."):
-                urls.add(f"https://{match.lstrip('/')}")
+                _remember(f"https://{match.lstrip('/')}")
             else:
-                urls.add(urljoin(base_url, match))
+                _remember(urljoin(base_url, match))
+
+        for match in re.findall(
+            r"/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+(?:\.js)(?:\?[^\"'\s<>()]+)?",
+            normalized_text,
+            flags=re.IGNORECASE,
+        ):
+            if match.startswith("/www."):
+                _remember(f"https://{match.lstrip('/')}")
+            else:
+                _remember(urljoin(base_url, match))
+
+        parsed_base = urlparse(base_url)
+        base_origin = f"{parsed_base.scheme}://{parsed_base.netloc}" if parsed_base.scheme and parsed_base.netloc else ""
+        relative_roots = []
+        seen_relative_roots = set()
+        for match in re.findall(r"['\"](/[^'\"`\s<>()]{1,120}/)['\"]", normalized_text, flags=re.IGNORECASE):
+            lower = match.lower()
+            if not any(
+                hint in lower
+                for hint in ("webradio", "radio", "player", "playlist", "current", "metadata", "stream", "live", "onair")
+            ):
+                continue
+            if match in seen_relative_roots:
+                continue
+            seen_relative_roots.add(match)
+            relative_roots.append(match)
+
+        relative_feed_files = []
+        seen_relative_feed_files = set()
+        for match in re.findall(
+            r"['\"]([A-Za-z0-9][A-Za-z0-9_.~:-]*(?:playlist|current|nowplaying|now-playing|currentsong|track|song|metadata|onair|title|titelliste)[A-Za-z0-9_.~:-]*\.(?:json|xml)(?:\?[^'\"\s<>()]+)?)['\"]",
+            normalized_text,
+            flags=re.IGNORECASE,
+        ):
+            if "/" in match:
+                continue
+            if match in seen_relative_feed_files:
+                continue
+            seen_relative_feed_files.add(match)
+            relative_feed_files.append(match)
+
+        if base_origin and relative_roots and relative_feed_files:
+            for relative_root in relative_roots[:8]:
+                root_url = urljoin(base_origin, relative_root)
+                for relative_feed_file in relative_feed_files[:16]:
+                    _remember(urljoin(root_url, relative_feed_file))
+
+        relative_script_files = []
+        seen_relative_script_files = set()
+        for match in re.findall(
+            r"['\"]([A-Za-z0-9][A-Za-z0-9_.~:-]*(?:main|chunk|player|radio|app|bundle|common|prefetch)[A-Za-z0-9_.~:-]*\.js(?:\?[^'\"\s<>()]+)?)['\"]",
+            normalized_text,
+            flags=re.IGNORECASE,
+        ):
+            if "/" in match:
+                continue
+            if match in seen_relative_script_files:
+                continue
+            seen_relative_script_files.add(match)
+            relative_script_files.append(match)
+
+        for relative_script_file in relative_script_files[:16]:
+            _remember(urljoin(base_url, relative_script_file))
 
         # Generic CMS pattern: entries like "something--100" often expose "*-avCustom.xml".
         for content_id in re.findall(r"([a-z0-9][a-z0-9-]{5,}--\d+)", normalized_text, flags=re.IGNORECASE):
             lower_id = content_id.lower()
             if not any(hint in lower_id for hint in ("live", "stream", "radio", "onair")):
                 continue
-            urls.add(urljoin(base_url, f"/stream/{content_id}-avCustom.xml"))
-            urls.add(urljoin(base_url, f"/{content_id}-avCustom.xml"))
+            _remember(urljoin(base_url, f"/stream/{content_id}-avCustom.xml"))
+            _remember(urljoin(base_url, f"/{content_id}-avCustom.xml"))
 
-        cleaned = []
-        seen = set()
-        for url in urls:
-            normalized = html.unescape(url.strip())
-            if not is_probable_url(normalized):
-                continue
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            cleaned.append(normalized)
-
-        return cleaned
+        return urls
 
     def _looks_like_feed_url(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -720,6 +796,8 @@ class NowPlayingDiscoveryService:
         if "form_action_url=" in lower_url:
             return False
         if "well-known" in path:
+            return False
+        if "video" in haystack:
             return False
         if any(token in path for token in ("current-track", "current_track", "currenttrack")):
             return True
@@ -900,8 +978,50 @@ class NowPlayingDiscoveryService:
         path = parsed.path.lower()
         if not path.endswith(".js"):
             return False
-        hints = ("webcode", "player", "radio", "main", "app", "bundle")
+        if "video" in path:
+            return False
+        hints = ("webcode", "player", "radio", "main", "app", "bundle", "chunk", "critical")
         return any(hint in path for hint in hints)
+
+    def _script_asset_priority(self, url: str) -> int:
+        path = urlparse(url).path.lower()
+        score = 0
+        if "main-chunk" in path:
+            score += 80
+        if "audioplayer" in path or "webradio" in path:
+            score += 70
+        if "critical-chunk" in path:
+            score += 50
+        if "main" in path:
+            score += 25
+        if "chunk" in path:
+            score += 20
+        if "audio" in path:
+            score += 15
+        if "player" in path:
+            score += 10
+        if "radio" in path:
+            score += 8
+        if "common" in path:
+            score -= 10
+        if "prefetch" in path:
+            score -= 20
+        return score
+
+    def _prioritize_script_asset_urls(self, urls: list[str], seed_url: str) -> list[str]:
+        seed_base = get_base_domain(seed_url)
+        filtered = []
+        seen = set()
+        for url in urls:
+            if not self._looks_like_script_asset(url):
+                continue
+            if seed_base and get_base_domain(url) != seed_base:
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            filtered.append(url)
+        return sorted(filtered, key=lambda url: (self._script_asset_priority(url), url), reverse=True)
 
     def _looks_like_stream_endpoint(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -940,6 +1060,8 @@ class NowPlayingDiscoveryService:
             score += 20
         if "/webradio/playlist/" in path_query:
             score -= 10
+        if "/~webradio/" in path_query and path.endswith(".json"):
+            score += 25
         if "/current/" in path_query and path.endswith(".json"):
             score += 60
         if "current-track" in path_query or "current_track" in path_query:
@@ -1103,14 +1225,17 @@ class NowPlayingDiscoveryService:
                         score += 8
                     if key.lower() in {"trackinfo", "currenttrack", "nowplaying"}:
                         score += 30
+                    score += self._json_status_score(node)
+                    score += self._json_playing_mode_score(node)
+                    score += self._json_time_window_score(time_text, duration_text)
                     age_minutes = self._age_minutes(time_text)
                     if age_minutes is not None:
                         if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
                             score -= 120
-                        else:
+                        elif age_minutes >= 0:
                             score += 20
-                    if self._is_duration_window_expired(time_text, duration_text):
-                        score -= 120
+                        else:
+                            score -= 40
                     candidates.append((score, artist, title, time_text, duration_text, age_minutes))
 
             for node in self._walk_json_objects(data):
@@ -1132,14 +1257,16 @@ class NowPlayingDiscoveryService:
                 if artist:
                     score += 8
                 score += self._json_status_score(node)
+                score += self._json_playing_mode_score(node)
+                score += self._json_time_window_score(time_text, duration_text)
                 age_minutes = self._age_minutes(time_text)
                 if age_minutes is not None:
                     if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
                         score -= 120
-                    else:
+                    elif age_minutes >= 0:
                         score += 20
-                if self._is_duration_window_expired(time_text, duration_text):
-                    score -= 120
+                    else:
+                        score -= 40
 
                 candidates.append((score, artist, title, time_text, duration_text, age_minutes))
 
@@ -1909,6 +2036,28 @@ class NowPlayingDiscoveryService:
                 return 100
             if value_lower in {"next", "upcoming"}:
                 return 15
+        return 0
+
+    def _json_playing_mode_score(self, node: dict) -> int:
+        value = self._extract_json_value(node, {"playingmode", "playing_mode", "playmode", "play_mode"})
+        normalized = (value or "").strip().lower()
+        if not normalized:
+            return 0
+        if normalized in {"1", "current", "now", "live", "onair", "playing"}:
+            return 180
+        if normalized in {"2", "previous", "last", "history"}:
+            return -60
+        if normalized in {"0", "next", "upcoming", "future", "queued"}:
+            return -90
+        return 0
+
+    def _json_time_window_score(self, time_text: str, duration_text: str) -> int:
+        if self._is_duration_window_active(time_text, duration_text):
+            return 260
+        if self._is_duration_window_expired(time_text, duration_text):
+            return -220
+        if time_text and duration_text:
+            return -40
         return 0
 
     def _split_compound_title(self, value: str) -> tuple[str, str]:
