@@ -8,9 +8,9 @@
     <platform>all</platform>
     <license>MIT</license>
     <language>de</language>
-    <summary lang="de_DE">Provider Finder Bridge fuer ASM</summary>
-    <summary lang="en_GB">Provider Finder bridge for ASM</summary>
-    <description lang="de_DE">Verarbeitet ASM-QF Requests ueber Window-Properties und liefert Artist/Title aus Provider Finder.</description>
-    <description lang="en_GB">Processes ASM-QF requests via window properties and returns artist/title from Provider Finder.</description>
+    <summary lang="de_DE">Provider Finder Brücke für Audio Stream Monitor</summary>
+    <summary lang="en_GB">Provider Finder bridge for Audio Stream Monitor</summary>
+    <description lang="de_DE">ASM-QF ist eine Erweiterung für Audio Stream Monitor (ASM). Das Addon sucht im Internet die Senderquelle und holt von dort aktuelle Songdaten. Es arbeitet mit einem Sendergedaechtnis, das ueber die Zeit ausgebaut wird und Eigenarten pro Sender beruecksichtigt. Nutze ASM-QF, wenn dein Sender trotz ASM unzureichende Songinfos liefert. ASM-QF muss in den ASM-Einstellungen aktiviert werden.</description>
+    <description lang="en_GB">ASM-QF is an extension for Audio Stream Monitor (ASM). It searches the internet for a station's source and pulls current song data from there. It uses station memory that grows over time and adapts to each station's quirks. Use ASM-QF when your station still provides insufficient song info even with ASM. ASM-QF must be enabled in ASM settings.</description>
   </extension>
 </addon>
