@@ -250,6 +250,11 @@ class NowPlayingDiscoveryService:
             candidates.add(feed_url)
             self._mark_trusted_candidate(feed_url)
 
+        playerbar_playlist_feeds = self._discover_playerbar_playlist_urls(seed_documents, resolved, station)
+        for feed_url in playerbar_playlist_feeds:
+            candidates.add(feed_url)
+            self._mark_trusted_candidate(feed_url)
+
         derived_html_candidates = set()
         for candidate in list(candidates):
             for derived in self._generate_html_nowplaying_variants(candidate):
@@ -2279,6 +2284,69 @@ class NowPlayingDiscoveryService:
 
         return feeds
 
+    def _discover_playerbar_playlist_urls(
+        self,
+        documents: list[tuple[str, str]],
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> set[str]:
+        container_urls = set()
+        for doc_url, text in documents:
+            if self._looks_like_playerbar_container_url(doc_url):
+                container_urls.add(doc_url)
+            if not text:
+                continue
+            for extracted in self._extract_urls_from_document(text, doc_url):
+                if self._looks_like_playerbar_container_url(extracted):
+                    container_urls.add(extracted)
+
+        if not container_urls:
+            return set()
+
+        ordered_containers = sorted(
+            container_urls,
+            key=lambda url: (
+                self._candidate_matches_input_context(url, resolved, station),
+                self._candidate_score(url),
+                url,
+            ),
+            reverse=True,
+        )
+
+        feeds = set()
+        station_name = (station.name if station else "") or resolved.station_name or ""
+        for container_url in ordered_containers[:24]:
+            payload_text, content_type = self._fetch_text(container_url)
+            if not payload_text:
+                continue
+            if not self._is_json_candidate(container_url, content_type, payload_text):
+                continue
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if not self._playerbar_container_matches(payload, container_url, resolved, station_name):
+                continue
+
+            playlist = payload.get("playlist")
+            if not isinstance(playlist, dict):
+                continue
+
+            feed_url = self._extract_json_value(playlist, {"feedurl", "feed_url", "playlisturl", "playlist_url"})
+            if not feed_url:
+                continue
+            if not is_probable_url(feed_url):
+                feed_url = urljoin(container_url, feed_url)
+            if not is_probable_url(feed_url):
+                continue
+            if not self._looks_like_feed_url(feed_url):
+                continue
+            feeds.add(feed_url)
+
+        return feeds
+
     def _extract_official_config_urls(self, documents: list[tuple[str, str]]) -> set[str]:
         config_urls = set()
 
@@ -2325,6 +2393,63 @@ class NowPlayingDiscoveryService:
                     config_urls.add(f"{scheme}://{netloc}/webradio/{mandate}/config.json")
 
         return config_urls
+
+    def _looks_like_playerbar_container_url(self, url: str) -> bool:
+        parsed = urlparse(str(url or "").strip())
+        path = parsed.path.lower()
+        if not parsed.scheme or not parsed.netloc:
+            return False
+        if not path.endswith(".json"):
+            return False
+        if "playerbarcontainer" not in path:
+            return False
+        return "/~webradio/" in path
+
+    def _playerbar_container_matches(
+        self,
+        payload: dict,
+        container_url: str,
+        resolved: ResolvedStream,
+        station_name: str,
+    ) -> bool:
+        audioplayer = payload.get("audioplayer")
+        saw_stream_source = False
+        if isinstance(audioplayer, dict):
+            sources = audioplayer.get("sources")
+            if isinstance(sources, list):
+                for item in sources:
+                    if not isinstance(item, dict):
+                        continue
+                    src = str(item.get("src") or "").strip()
+                    if not src:
+                        continue
+                    saw_stream_source = True
+                    if self._stream_url_matches(src, resolved.resolved_url):
+                        return True
+                    if resolved.delivery_url and self._stream_url_matches(src, resolved.delivery_url):
+                        return True
+        if saw_stream_source:
+            return False
+
+        if not station_name:
+            return False
+
+        candidates = [container_url]
+        if isinstance(audioplayer, dict):
+            candidates.append(str(audioplayer.get("name") or ""))
+            candidates.append(str(audioplayer.get("mediaId") or ""))
+
+        show = payload.get("show")
+        if isinstance(show, dict):
+            show_data = show.get("data")
+            if isinstance(show_data, dict):
+                candidates.append(str(show_data.get("title") or ""))
+                candidates.append(str(show_data.get("stationid") or ""))
+
+        for candidate in candidates:
+            if candidate and self._station_name_matches(candidate, station_name):
+                return True
+        return False
 
     def _discover_loverad_flow_urls(
         self,
