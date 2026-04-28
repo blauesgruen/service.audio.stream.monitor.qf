@@ -13,6 +13,7 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Bevorzugte Nutzung externer Feed-Quellen (`XML`/`JSON`/`HTML`) mit `artist/title`, falls auffindbar
 - Zentrale Feed-Priorisierung: offizielle HTML-Now-Playing-Kandidaten zuerst, danach starke strukturierte Feeds (`XML`/`JSON`), dann Rest
 - Discovery kann offizielle Now-Playing-Feeds auch aus verschachtelten Script-Bundles derselben Domain ableiten (z. B. dynamisch zusammengesetzte `...playerbarPlaylist...json`-URLs)
+- Discovery kann bei offiziellen `playerbarContainer.json`-Dokumenten die darin referenzierte `playlist.feedUrl` verfolgen, sofern der eingebettete Stream eindeutig zum aufgeloesten Sender passt
 - Feed-Probing kann parallel in Batches laufen (`NOWPLAYING_PARALLEL_*` in `app/config.py`)
 - Generische Icecast/Shoutcast-Statusquellen werden mitberuecksichtigt (`status-json.xsl`, `status.xsl`, `stats`)
 - Anzeige der tatsächlich genutzten Song-Quelle (`source_url`) im Quell-Details-Fenster

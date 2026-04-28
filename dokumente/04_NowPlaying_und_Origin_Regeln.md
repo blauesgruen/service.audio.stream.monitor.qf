@@ -45,6 +45,7 @@ Aus Seeds werden Inhalte geholt und nach URLs durchsucht:
 Zusatzlogik:
 
 - `avcustom`-Dokumente werden extra verfolgt
+- offizielle `playerbarContainer.json`-Dokumente koennen zusaetzlich bis zur referenzierten `playlist.feedUrl` verfolgt werden, wenn ihr eingebetteter Audiostream zum aufgeloesten Sender passt
 - Audio-/Video-Content wird als Discovery-Text verworfen
 
 ## Kandidaten-Ranking
@@ -219,6 +220,14 @@ Wenn eine Seite `data-mandate` + `webradio.js` enthaelt, wird zusaetzlich versuc
 2. passenden Channel (Name/ID/Stream-Match) bestimmen
 3. `currentUrl`/`playlistUrl` als Song-Feed-Kandidaten nutzen
 4. falls ein Player seine Feed-URL erst in Script-Bundles zusammensetzt, werden relative Script- und Feed-Pfade derselben Domain nachverfolgt
+
+Ergaenzend dazu kann die Discovery generisch offizielle `playerbarContainer.json`-Dokumente auswerten:
+
+1. Container-URL aus HTML `data-*`/Link-Attributen extrahieren
+2. eingebettete `audioplayer.sources[*].src` gegen den aufgeloesten Sender-Stream matchen
+3. nur bei eindeutigem Match die referenzierte `playlist.feedUrl` als Song-Feed-Kandidat uebernehmen
+
+Dadurch bleiben breit verlinkte Player-Container auf Senderseiten nutzbar, ohne benachbarte Stations-Container blind mitzunehmen.
 
 ## Songwechsel- und Songende-Erkennung
 

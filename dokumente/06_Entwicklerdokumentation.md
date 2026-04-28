@@ -144,6 +144,7 @@ Wichtig:
 - HTTP-Transport mit Best-Effort-Fallback (`https` -> unverified SSL bei Cert-Fehler -> optional `http`)
 - `trusted` markiert Discovery-Quellen aus offizieller Player-Kette; nur mit `ALLOW_OFFICIAL_CHAIN_SOURCES=True` zusaetzlich erlaubt
 - zusaetzliche generische Player-Config-Extraktion (`data-mandate` + `webradio.js` -> `config.json` -> `currentUrl`/`playlistUrl`)
+- zusaetzliche schmale Playerbar-Extraktion: offizielle `playerbarContainer.json`-Dokumente werden nur bei echtem Stream-Match verfolgt und liefern dann ihre `playlist.feedUrl` als Kandidat
 
 ### `EpgService` (`app/epg_service.py`)
 
