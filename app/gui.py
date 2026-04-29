@@ -31,13 +31,16 @@ if __package__:
     from .database import SourceDatabase
     from .epg_service import EpgService
     from .live_logger import LiveLogger
-    from .metadata import MetadataError, SongMetadataFetcher
+    from .metadata import SongMetadataFetcher
     from .models import EpgInfo, ResolvedStream, SongInfo, StationMatch
     from .now_playing_discovery import NowPlayingDiscoveryService
     from .song_validation import is_valid_song_candidate, prefilter_pair
+    from .song_probe import SongProbeConfig, SongProbeSession
+    from .station_identity import find_station_by_name_with_fallback
+    from .source_policy import collect_origin_domains
     from .station_lookup import StationLookupError, StationLookupService
     from .stream_resolver import StreamResolveError, StreamResolver
-    from .utils import get_base_domain, is_non_origin_directory_url, is_origin_url, is_probable_url
+    from .utils import is_probable_url
 else:
     # Allow direct execution via `python app/gui.py`.
     project_root = Path(__file__).resolve().parent.parent
@@ -61,20 +64,23 @@ else:
     from app.database import SourceDatabase
     from app.epg_service import EpgService
     from app.live_logger import LiveLogger
-    from app.metadata import MetadataError, SongMetadataFetcher
+    from app.metadata import SongMetadataFetcher
     from app.models import EpgInfo, ResolvedStream, SongInfo, StationMatch
     from app.now_playing_discovery import NowPlayingDiscoveryService
     from app.song_validation import is_valid_song_candidate, prefilter_pair
+    from app.song_probe import SongProbeConfig, SongProbeSession
+    from app.station_identity import find_station_by_name_with_fallback
+    from app.source_policy import collect_origin_domains
     from app.station_lookup import StationLookupError, StationLookupService
     from app.stream_resolver import StreamResolveError, StreamResolver
-    from app.utils import get_base_domain, is_non_origin_directory_url, is_origin_url, is_probable_url
+    from app.utils import is_probable_url
 
 
 class RadioToolApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("940x600")
+        self.root.geometry("940x650")
 
         self.logger = LiveLogger()
         self.db = SourceDatabase(DB_PATH)
@@ -443,7 +449,7 @@ class RadioToolApp:
                     stream_seed = query
                     if not is_probable_url(query):
                         station = self._run_with_429_retry(
-                            lambda: lookup.find_best_match(query),
+                            lambda: find_station_by_name_with_fallback(lookup, query),
                             label=f"{label} Lookup {query}",
                         )
                         found_station_name = station.name or ""
@@ -650,7 +656,7 @@ class RadioToolApp:
 
             if not is_probable_url(value):
                 self.logger.log(f"Eingabe als Sendername erkannt: {value}")
-                station = lookup.find_best_match(value)
+                station = find_station_by_name_with_fallback(lookup, value)
                 stream_seed = station.stream_url
                 self._results.put(("station", station))
                 self.logger.log(f"Sendername auf Stream-URL aufgelöst: {stream_seed}")
@@ -702,39 +708,38 @@ class RadioToolApp:
                 self.logger.log("EPG-Suche deaktiviert (GUI-Schalter).")
                 self._results.put(("epg_disabled", None))
 
-            feed_candidates: list[str] = []
-            official_html_feed_candidates: list[str] = []
-            preferred_feed_url = ""
+            probe_session = SongProbeSession(
+                resolved=resolved,
+                station=station,
+                origin_domains=origin_domains,
+                fetcher=fetcher,
+                discovery=now_playing_discovery,
+                config=SongProbeConfig(
+                    origin_only_mode=ORIGIN_ONLY_MODE,
+                    allow_official_chain_sources=ALLOW_OFFICIAL_CHAIN_SOURCES,
+                    strict_webplayer_source=NOWPLAYING_STRICT_WEBPLAYER_SOURCE,
+                    stale_without_stream_track_max_age_minutes=
+                    NOWPLAYING_STALE_WITHOUT_STREAM_TRACK_MAX_AGE_MINUTES,
+                ),
+                pair_is_valid=lambda artist, title: is_valid_song_candidate(
+                    artist,
+                    title,
+                    station_name=station.name if station else "",
+                ),
+                log=self.logger.log,
+            )
+
+            last_feed_candidates: list[str] = []
+            last_linked_domains: list[str] = []
             reported_no_origin_song = False
             last_song_key = ""
             consecutive_no_song_cycles = 0
             consecutive_empty_metadata_cycles = 0
-            rejected_non_origin_source = False
             restricted_source_mode = ORIGIN_ONLY_MODE or ALLOW_OFFICIAL_CHAIN_SOURCES
             last_stream_error = ""
-            reported_stream_deferred = False
             last_song_state = "IDLE"
             consecutive_missing_streamtitle_cycles = 0
             reported_streamtitle_grace = False
-
-            def classify_song_source(url: str) -> tuple[bool, str]:
-                if not url:
-                    return False, ""
-                if not ORIGIN_ONLY_MODE:
-                    return True, "unrestricted"
-                if is_origin_url(url, origin_domains):
-                    return True, "origin"
-                if (
-                    ALLOW_OFFICIAL_CHAIN_SOURCES
-                    and now_playing_discovery.is_trusted_candidate(url)
-                    and not is_non_origin_directory_url(url)
-                ):
-                    return True, "official_player_chain"
-                return False, "blocked_non_allowed"
-
-            def is_allowed_song_source(url: str) -> bool:
-                allowed, _ = classify_song_source(url)
-                return allowed
 
             def has_metadata_signal(song: SongInfo | None) -> bool:
                 if not song:
@@ -755,154 +760,41 @@ class RadioToolApp:
                 self._results.put(("song_state", new_state))
 
             while not self._stop_event.is_set():
-                stream_song: SongInfo | None = None
-                feed_song: SongInfo | None = None
-                chosen_song: SongInfo | None = None
-                stream_song_is_track = False
-                stream_song_is_origin = False
-                stream_song_approval = ""
-                stream_title_missing_in_cycle = False
-                strict_webplayer_mode = (
-                    NOWPLAYING_STRICT_WEBPLAYER_SOURCE
-                    and bool(official_html_feed_candidates)
-                )
+                probe_result = probe_session.probe_once()
+                stream_song = probe_result.stream_song
+                feed_song = probe_result.feed_song
+                chosen_song = probe_result.chosen_song
+                stream_title_missing_in_cycle = probe_result.stream_title_missing_in_cycle
 
-                try:
-                    stream_song = fetcher.fetch(resolved.resolved_url)
+                if stream_song:
                     self.logger.log(f"ICY-Slot: {stream_song.stream_title}")
                     last_stream_error = ""
                     consecutive_missing_streamtitle_cycles = 0
-                except (MetadataError, URLError, TimeoutError, OSError) as meta_err:
-                    current_error = str(meta_err)
-                    if "kein StreamTitle gefunden" in current_error:
-                        stream_title_missing_in_cycle = True
+                elif probe_result.stream_error:
+                    current_error = probe_result.stream_error
+                    if stream_title_missing_in_cycle:
                         consecutive_missing_streamtitle_cycles += 1
                     else:
                         consecutive_missing_streamtitle_cycles = 0
                     if current_error != last_stream_error:
-                        self.logger.log(f"Songabfrage fehlgeschlagen: {meta_err}")
-                        self._results.put(("error", f"Songabfrage fehlgeschlagen: {meta_err}"))
+                        self.logger.log(f"Songabfrage fehlgeschlagen: {current_error}")
+                        self._results.put(("error", f"Songabfrage fehlgeschlagen: {current_error}"))
                         last_stream_error = current_error
 
-                if stream_song:
-                    stream_song_is_track = is_valid_song_candidate(
-                        stream_song.artist,
-                        stream_song.title,
-                        station_name=station.name if station else "",
-                    )
-                    stream_song_is_origin, stream_song_approval = classify_song_source(stream_song.source_url)
-                    if stream_song_is_track and not stream_song_is_origin:
-                        rejected_non_origin_source = True
-                        self.logger.log(f"Stream-Metadaten verworfen (nicht erlaubt): {stream_song.source_url}")
-
-                if not feed_candidates:
-                    discovered = now_playing_discovery.discover_candidate_urls(
-                        resolved=resolved,
-                        station=station,
-                        stream_headers=stream_song.source_headers if stream_song else {},
-                    )
-                    feed_candidates = []
-                    for url in discovered:
-                        if is_allowed_song_source(url):
-                            feed_candidates.append(url)
-                        else:
-                            rejected_non_origin_source = True
-                            self.logger.log(f"Feed-Kandidat verworfen (nicht erlaubt): {url}")
-                    official_html_feed_candidates = now_playing_discovery.filter_official_html_candidates(
-                        feed_candidates,
-                        station,
-                    )
-                    if official_html_feed_candidates:
+                if probe_result.feed_candidates != last_feed_candidates:
+                    if probe_result.official_html_feed_candidates:
                         self.logger.log(
                             "Offizielle HTML-Now-Playing-Feeds priorisiert: "
-                            + ", ".join(official_html_feed_candidates)
+                            + ", ".join(probe_result.official_html_feed_candidates)
                         )
-                    linked_domains = sorted(now_playing_discovery.get_linked_domains() - origin_domains)
-                    if linked_domains:
+                    if probe_result.linked_domains and probe_result.linked_domains != last_linked_domains:
                         self.logger.log(
-                            "Offiziell verlinkte Zusatz-Domains (nicht Origin): " + ", ".join(linked_domains)
+                            "Offiziell verlinkte Zusatz-Domains (nicht Origin): "
+                            + ", ".join(probe_result.linked_domains)
                         )
-                    self._results.put(("feed_candidates", feed_candidates))
-
-                strict_webplayer_mode = (
-                    NOWPLAYING_STRICT_WEBPLAYER_SOURCE
-                    and bool(official_html_feed_candidates)
-                )
-                if stream_song_is_track and stream_song_is_origin:
-                    if strict_webplayer_mode:
-                        if not reported_stream_deferred:
-                            self.logger.log(
-                                "ICY-Treffer zurückgestellt: offizieller HTML-Webplayer-Feed verfügbar."
-                            )
-                            reported_stream_deferred = True
-                    else:
-                        chosen_song = stream_song
-                        chosen_song.source_approval = stream_song_approval
-                        reported_stream_deferred = False
-                elif not strict_webplayer_mode:
-                    reported_stream_deferred = False
-
-                if feed_candidates:
-                    probe_candidates = (
-                        now_playing_discovery.prioritize_feed_candidates(feed_candidates, station)
-                        if strict_webplayer_mode
-                        else feed_candidates
-                    )
-                    if preferred_feed_url and preferred_feed_url not in probe_candidates:
-                        preferred_feed_url = ""
-                    probe_list = [preferred_feed_url] if preferred_feed_url else probe_candidates
-                    feed_song = now_playing_discovery.fetch_now_playing(
-                        probe_list,
-                        station_name=station.name if station else "",
-                    )
-                    if feed_song and is_valid_song_candidate(
-                        feed_song.artist,
-                        feed_song.title,
-                        station_name=station.name if station else "",
-                    ):
-                        if (
-                            strict_webplayer_mode
-                            and stream_song
-                            and not stream_song_is_track
-                            and feed_song.age_minutes is not None
-                            and feed_song.age_minutes >= NOWPLAYING_STALE_WITHOUT_STREAM_TRACK_MAX_AGE_MINUTES
-                        ):
-                            self.logger.log(
-                                "Feed-Treffer verworfen (veraltet ohne ICY-Track-Signal): "
-                                f"{feed_song.stream_title} ({feed_song.age_minutes} min alt)"
-                            )
-                            feed_song = None
-                    if feed_song and is_valid_song_candidate(
-                        feed_song.artist,
-                        feed_song.title,
-                        station_name=station.name if station else "",
-                    ):
-                        # Keep stream headers available in detail view where possible.
-                        if stream_song and stream_song.source_headers:
-                            feed_song.source_headers = stream_song.source_headers
-                        feed_song_is_origin, feed_song_approval = classify_song_source(feed_song.source_url)
-                        if feed_song_is_origin:
-                            feed_song.source_approval = feed_song_approval
-                            chosen_song = feed_song
-                            preferred_feed_url = feed_song.source_url or preferred_feed_url
-                        else:
-                            rejected_non_origin_source = True
-                            self.logger.log(
-                                f"Feed-Treffer verworfen (nicht erlaubt): {feed_song.source_url}"
-                            )
-
-                if (
-                    strict_webplayer_mode
-                    and not chosen_song
-                    and stream_song_is_track
-                    and stream_song_is_origin
-                ):
-                    self.logger.log(
-                        "Kein gueltiger HTML-Feed-Treffer; falle auf ICY-Treffer zurueck."
-                    )
-                    chosen_song = stream_song
-                    chosen_song.source_approval = stream_song_approval
-                    reported_stream_deferred = False
+                    self._results.put(("feed_candidates", probe_result.feed_candidates))
+                    last_feed_candidates = list(probe_result.feed_candidates)
+                    last_linked_domains = list(probe_result.linked_domains)
 
                 if chosen_song and is_valid_song_candidate(
                     chosen_song.artist,
@@ -980,7 +872,7 @@ class RadioToolApp:
                                     message = "Keine aktuelle Origin-Quelle mit eindeutigem Artist gefunden"
                                 else:
                                     message = "Keine aktuelle Quelle mit eindeutigem Artist gefunden"
-                                if rejected_non_origin_source:
+                                if probe_result.rejected_non_origin_source:
                                     message += " (nicht erlaubte Quelle verworfen)"
                                 self._results.put(("error", message))
                                 reported_no_origin_song = True
@@ -1085,37 +977,7 @@ class RadioToolApp:
         station: StationMatch | None,
         resolved: ResolvedStream | None = None,
     ) -> set[str]:
-        domains = set()
-
-        if resolved:
-            for url_value in (resolved.resolved_url,):
-                base = get_base_domain(url_value)
-                if base:
-                    domains.add(base)
-
-        if not station:
-            return domains
-
-        source_type = str(station.raw_record.get("source") or "").strip().lower()
-        candidate_urls = [station.stream_url]
-        if station.homepage and not is_non_origin_directory_url(station.homepage):
-            candidate_urls.append(station.homepage)
-
-        if source_type != "web_directory_fallback":
-            for key in ("url", "url_resolved", "homepage", "stream_url"):
-                value = station.raw_record.get(key)
-                if not isinstance(value, str):
-                    continue
-                if key == "homepage" and is_non_origin_directory_url(value):
-                    continue
-                candidate_urls.append(value)
-
-        for value in candidate_urls:
-            base = get_base_domain(value)
-            if base:
-                domains.add(base)
-
-        return domains
+        return collect_origin_domains(station, resolved)
 
 
 def run_app() -> None:

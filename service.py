@@ -239,15 +239,21 @@ class QFBridgeService(xbmc.Monitor):
             from app.metadata import SongMetadataFetcher
             from app.now_playing_discovery import NowPlayingDiscoveryService
             from app.song_validation import prefilter_pair
+            from app.song_probe import SongProbeConfig, SongProbeSession
+            from app.station_identity import (
+                build_station_key,
+                build_station_lookup_variants,
+                compact_station_text,
+                find_station_by_name_with_fallback,
+                normalize_station_id,
+                normalize_station_name,
+                sanitize_station_text,
+            )
+            from app.source_policy import classify_song_source, collect_origin_domains
             from app.station_lookup import StationLookupService
             from app.stream_resolver import StreamResolver
             from app.source_registry import VerifiedSourceRepository
-            from app.utils import (
-                get_base_domain,
-                is_non_origin_directory_url,
-                is_origin_url,
-                is_probable_url,
-            )
+            from app.utils import is_probable_url
         except Exception as err:
             self._imports_ready = False
             self._import_error = str(err)
@@ -315,12 +321,20 @@ class QFBridgeService(xbmc.Monitor):
         self.SongMetadataFetcher = SongMetadataFetcher
         self.NowPlayingDiscoveryService = NowPlayingDiscoveryService
         self.prefilter_pair = prefilter_pair
+        self.SongProbeConfig = SongProbeConfig
+        self.SongProbeSession = SongProbeSession
+        self.build_station_key = build_station_key
+        self.build_station_lookup_variants = build_station_lookup_variants
+        self.classify_song_source = classify_song_source
+        self.compact_station_text = compact_station_text
+        self.collect_origin_domains = collect_origin_domains
+        self.find_station_by_name_with_fallback = find_station_by_name_with_fallback
+        self.normalize_station_id = normalize_station_id
+        self.normalize_station_name = normalize_station_name
+        self.sanitize_station_text = sanitize_station_text
         self.StationLookupService = StationLookupService
         self.StreamResolver = StreamResolver
         self.VerifiedSourceRepository = VerifiedSourceRepository
-        self.get_base_domain = get_base_domain
-        self.is_non_origin_directory_url = is_non_origin_directory_url
-        self.is_origin_url = is_origin_url
         self.is_probable_url = is_probable_url
         return True
 
@@ -385,43 +399,21 @@ class QFBridgeService(xbmc.Monitor):
         )
 
     def _collect_origin_domains(self, station, resolved):
-        domains = set()
-        if resolved:
-            base = self.get_base_domain(resolved.resolved_url)
-            if base:
-                domains.add(base)
-
-        if not station:
-            return domains
-
-        source_type = str(station.raw_record.get("source") or "").strip().lower()
-        candidate_urls = [station.stream_url]
-        if station.homepage and not self.is_non_origin_directory_url(station.homepage):
-            candidate_urls.append(station.homepage)
-
-        if source_type != "web_directory_fallback":
-            for key in ("url", "url_resolved", "homepage", "stream_url"):
-                value = station.raw_record.get(key)
-                if not isinstance(value, str):
-                    continue
-                if key == "homepage" and self.is_non_origin_directory_url(value):
-                    continue
-                candidate_urls.append(value)
-
-        for value in candidate_urls:
-            base = self.get_base_domain(value)
-            if base:
-                domains.add(base)
-
-        return domains
+        return self.collect_origin_domains(station, resolved)
 
     def _normalize_station_name(self, value):
+        helper = getattr(self, "normalize_station_name", None)
+        if helper:
+            return helper(value)
         return " ".join(str(value or "").strip().lower().split())
 
     def _normalize_url(self, value):
         return str(value or "").strip().lower()
 
     def _normalize_station_id(self, value):
+        helper = getattr(self, "normalize_station_id", None)
+        if helper:
+            return helper(value)
         text = str(value or "")
         if not text:
             return ""
@@ -433,6 +425,9 @@ class QFBridgeService(xbmc.Monitor):
         return text
 
     def _sanitize_station_text(self, value):
+        helper = getattr(self, "sanitize_station_text", None)
+        if helper:
+            return helper(value)
         text = str(value or "")
         if not text:
             return ""
@@ -442,6 +437,9 @@ class QFBridgeService(xbmc.Monitor):
         return text
 
     def _compact_station_text(self, value):
+        helper = getattr(self, "compact_station_text", None)
+        if helper:
+            return helper(value)
         text = self._sanitize_station_text(value).lower()
         if not text:
             return ""
@@ -451,6 +449,9 @@ class QFBridgeService(xbmc.Monitor):
         return text
 
     def _build_station_lookup_variants(self, value):
+        helper = getattr(self, "build_station_lookup_variants", None)
+        if helper:
+            return helper(value)
         raw = self._sanitize_station_text(value)
         if not raw:
             return []
@@ -477,39 +478,30 @@ class QFBridgeService(xbmc.Monitor):
         return variants
 
     def _find_station_by_name_with_fallback(self, lookup, station_input, station_id_norm=""):
-        variants = self._build_station_lookup_variants(station_input)
-        if not variants:
-            raise ValueError("Kein gültiger Sendername für Lookup vorhanden.")
-
-        last_error = None
-        for idx, variant in enumerate(variants):
-            try:
-                if station_id_norm:
-                    station = lookup.find_best_match(variant, station_id=station_id_norm)
-                else:
-                    station = lookup.find_best_match(variant)
-                if idx > 0:
-                    self.logger.info(
-                        "station_name_lookup_fallback_ok",
-                        input=station_input,
-                        variant=variant,
-                        station_id=station_id_norm,
-                        name=station.name,
-                    )
-                return station
-            except Exception as err:
-                last_error = err
-                self.logger.debug(
-                    "station_name_lookup_variant_failed",
-                    input=station_input,
-                    variant=variant,
-                    station_id=station_id_norm,
-                    error=str(err),
-                )
-
-        raise last_error if last_error else ValueError("Kein passender Sender gefunden.")
+        return self.find_station_by_name_with_fallback(
+            lookup,
+            station_input,
+            station_id=station_id_norm,
+            on_variant_failed=lambda variant, err: self.logger.debug(
+                "station_name_lookup_variant_failed",
+                input=station_input,
+                variant=variant,
+                station_id=station_id_norm,
+                error=str(err),
+            ),
+            on_variant_selected=lambda variant, station: self.logger.info(
+                "station_name_lookup_fallback_ok",
+                input=station_input,
+                variant=variant,
+                station_id=station_id_norm,
+                name=station.name,
+            ),
+        )
 
     def _build_station_key(self, station_name, station_id=""):
+        helper = getattr(self, "build_station_key", None)
+        if helper:
+            return helper(station_name, station_id=station_id)
         station_id_norm = self._normalize_station_id(station_id)
         if station_id_norm:
             return f"stationid:{station_id_norm}"
@@ -1789,38 +1781,19 @@ class QFBridgeService(xbmc.Monitor):
             return superseded
 
         def classify_source(url):
-            if not url:
-                return False, ""
-            if not self.ORIGIN_ONLY_MODE:
-                return True, "unrestricted"
-            if self.is_origin_url(url, origin_domains):
-                return True, "origin"
-            if (
-                self.ALLOW_OFFICIAL_CHAIN_SOURCES
-                and discovery.is_trusted_candidate(url)
-                and not self.is_non_origin_directory_url(url)
-            ):
-                return True, "official_player_chain"
-            return False, "blocked_non_allowed"
+            return self.classify_song_source(
+                url,
+                origin_domains,
+                origin_only_mode=self.ORIGIN_ONLY_MODE,
+                allow_official_chain_sources=self.ALLOW_OFFICIAL_CHAIN_SOURCES,
+                trusted_candidate_check=discovery.is_trusted_candidate,
+            )
 
         meta = {
             "station": station.name if station else station_input,
             "resolved_url": resolved.resolved_url,
             "delivery_url": resolved.delivery_url or "",
         }
-
-        stream_song = None
-        stream_error = ""
-        stream_probe_started = time.time()
-        try:
-            stream_song = fetcher.fetch(resolved.resolved_url)
-        except Exception as err:
-            stream_error = str(err)
-        _mark_phase("stream_probe", stream_probe_started)
-
-        superseded = _check_superseded("after_stream_probe")
-        if superseded:
-            return superseded
 
         station_name = station.name if station else station_input
         station_slug = ""
@@ -1846,17 +1819,6 @@ class QFBridgeService(xbmc.Monitor):
             )
             return a, t, state
 
-        stream_headers = stream_song.source_headers if stream_song else {}
-        if stream_song:
-            _, _, stream_pair_state = validate_qf_pair(stream_song.artist, stream_song.title)
-        discovery_started = time.time()
-        feed_candidates = discovery.discover_candidate_urls(
-            resolved=resolved,
-            station=station,
-            stream_headers=stream_headers,
-        )
-        probe_candidates = discovery.prioritize_feed_candidates(feed_candidates, station) or feed_candidates
-        feed_song = None
         feed_retry_attempts = int(self.QF_FEED_RETRY_ATTEMPTS)
         feed_retry_attempts = max(self.QF_FEED_RETRY_MIN_ATTEMPTS, feed_retry_attempts)
         feed_retry_attempts = min(self.QF_FEED_RETRY_MAX_ATTEMPTS, feed_retry_attempts)
@@ -1869,39 +1831,42 @@ class QFBridgeService(xbmc.Monitor):
             elif request_gap_smoothed >= float(self.QF_FEED_RETRY_LONG_GAP_SECONDS):
                 feed_retry_attempts = self.QF_FEED_RETRY_MAX_ATTEMPTS
 
-        feed_retry_delay_seconds = float(self.QF_FEED_RETRY_DELAY_SECONDS)
-        if self.QF_DISCOVERY_QUICKPASS_ENABLED and probe_candidates:
-            quick_pass_started = time.time()
-            feed_song = discovery.fetch_now_playing(
-                probe_candidates,
-                station_name=station_name,
-                max_candidates=self.QF_DISCOVERY_QUICKPASS_MAX_CANDIDATES,
-                max_elapsed_seconds=self.QF_DISCOVERY_QUICKPASS_MAX_SECONDS,
-            )
-            _mark_phase("discovery_quick_pass", quick_pass_started)
-            if not feed_song:
-                feed_pair_state = "missing_field"
-            else:
-                _, _, feed_pair_state = validate_qf_pair(feed_song.artist, feed_song.title)
+        probe_started = time.time()
+        probe_session = self.SongProbeSession(
+            resolved=resolved,
+            station=station,
+            origin_domains=origin_domains,
+            fetcher=fetcher,
+            discovery=discovery,
+            config=self.SongProbeConfig(
+                origin_only_mode=self.ORIGIN_ONLY_MODE,
+                allow_official_chain_sources=self.ALLOW_OFFICIAL_CHAIN_SOURCES,
+                strict_webplayer_source=False,
+                stale_without_stream_track_max_age_minutes=0,
+                feed_retry_attempts=feed_retry_attempts,
+                feed_retry_delay_seconds=float(self.QF_FEED_RETRY_DELAY_SECONDS),
+                quickpass_enabled=self.QF_DISCOVERY_QUICKPASS_ENABLED,
+                quickpass_max_candidates=self.QF_DISCOVERY_QUICKPASS_MAX_CANDIDATES,
+                quickpass_max_seconds=self.QF_DISCOVERY_QUICKPASS_MAX_SECONDS,
+            ),
+            pair_is_valid=lambda artist, title: validate_qf_pair(artist, title)[2] == "ok",
+            pair_validator=validate_qf_pair,
+            log=lambda message: self.logger.debug("core_trace", message=message),
+        )
+        probe_result = probe_session.probe_once()
+        stream_song = probe_result.stream_song
+        feed_song = probe_result.feed_song
+        stream_error = probe_result.stream_error
+        stream_pair_state = probe_result.stream_pair_state
+        feed_pair_state = probe_result.feed_pair_state
+        _mark_phase("stream_probe", probe_started)
+        _mark_phase("discovery", probe_started)
+        if self.QF_DISCOVERY_QUICKPASS_ENABLED:
+            phase_timings.setdefault("discovery_quick_pass", phase_timings.get("discovery") or 0.0)
 
-        if feed_pair_state != "ok":
-            for attempt in range(1, feed_retry_attempts + 1):
-                superseded = _check_superseded(f"discovery_retry_{attempt}_start")
-                if superseded:
-                    return superseded
-                feed_song = discovery.fetch_now_playing(probe_candidates, station_name=station_name)
-                if not feed_song:
-                    feed_pair_state = "missing_field"
-                else:
-                    _, _, feed_pair_state = validate_qf_pair(feed_song.artist, feed_song.title)
-                    if feed_pair_state == "ok":
-                        break
-                if attempt < feed_retry_attempts:
-                    superseded = _check_superseded(f"discovery_retry_{attempt}_sleep")
-                    if superseded:
-                        return superseded
-                    time.sleep(feed_retry_delay_seconds)
-        _mark_phase("discovery", discovery_started)
+        superseded = _check_superseded("after_stream_probe")
+        if superseded:
+            return superseded
 
         superseded = _check_superseded("after_discovery")
         if superseded:
