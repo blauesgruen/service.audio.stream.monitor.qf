@@ -207,6 +207,12 @@ Wichtig:
 - nutzt denselben Auswahlkern fuer Stream-/Feed-Song und Source-Policy
 - GUI und Kodi unterscheiden sich danach nur noch in ihrer zustandsspezifischen Nachbearbeitung
 
+Hinweis zur Laufzeit:
+
+- Feed-Probing ist parallelisiert.
+- Der vorgelagerte Discovery-Crawl fuer Seed-Seiten und Script-Assets ist ebenfalls begrenzt parallelisiert.
+- Beides ist absichtlich I/O-basiert ueber Threads umgesetzt, nicht ueber Prozesse.
+
 #### `song_parity.py`
 
 Oeffentliche Typen:

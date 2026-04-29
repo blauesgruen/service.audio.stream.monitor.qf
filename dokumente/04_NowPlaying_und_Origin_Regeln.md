@@ -47,6 +47,7 @@ Zusatzlogik:
 - `avcustom`-Dokumente werden extra verfolgt
 - offizielle `playerbarContainer.json`-Dokumente koennen zusaetzlich bis zur referenzierten `playlist.feedUrl` verfolgt werden, wenn ihr eingebetteter Audiostream zum aufgeloesten Sender passt
 - Audio-/Video-Content wird als Discovery-Text verworfen
+- redaktionelle HTML-Seiten mit Podcast-/Artikel-Charakter ohne echte Now-Playing-Struktur werden nicht mehr als direkte HTML-Feed-Kandidaten bevorzugt
 
 ## Kandidaten-Ranking
 
@@ -71,6 +72,11 @@ Nach dem Ranking werden Kandidaten fuer den Abruf nochmals zentral priorisiert:
 3. Restliche Kandidaten
 
 Damit bleiben klassische Player-Seiten sichtbar, ohne strukturierte Feeds zu verdraengen.
+
+Wichtig:
+
+- Reine redaktionelle HTML-Seiten mit langen Podcast-/Artikel-Slugs werden generisch abgewertet oder ganz aus
+  dem direkten HTML-Probe-Pfad herausgenommen, wenn keine echten Reload-/Current-/OnAir-Signale vorliegen.
 
 ## Stream-Key-Erkennung
 
@@ -160,6 +166,19 @@ Wichtig:
   - `NOWPLAYING_PARALLEL_BATCH_SIZE`
 - Trefferreihenfolge bleibt stabil zur priorisierten Kandidatenliste.
 - Bei erstem gueltigen `artist/title`-Treffer wird der Poll-Zyklus frueh beendet.
+
+## Paralleler Discovery-Crawl
+
+Der vorgelagerte Discovery-Crawl fuer Seed-Seiten, Unterseiten und priorisierte Script-Assets kann ebenfalls
+begrenzt parallel laufen.
+
+- Konfiguration ueber:
+  - `DISCOVERY_CRAWL_MAX_WORKERS`
+  - `DISCOVERY_PAGE_FETCH_BUDGET`
+  - `DISCOVERY_SCRIPT_FETCH_BUDGET`
+- Ziel:
+  - weniger Wartezeit beim ersten Kandidatenaufbau
+  - trotzdem begrenzte, kontrollierte Crawl-Tiefe
 
 ## Verified-Source-Fastpath (Kodi-Bridge)
 
@@ -264,4 +283,3 @@ Damit werden reine Webradio-Streams haeufig robuster gefunden, ohne sender-spezi
 - Ohne eindeutige Tokens in Quelle bleibt nur best-effort.
 
 Der Ansatz bleibt trotzdem robust, weil er mehrere Quellen parallel bewertet und nur eindeutige Daten akzeptiert.
-

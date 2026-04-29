@@ -15,6 +15,7 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Discovery kann offizielle Now-Playing-Feeds auch aus verschachtelten Script-Bundles derselben Domain ableiten (z. B. dynamisch zusammengesetzte `...playerbarPlaylist...json`-URLs)
 - Discovery kann bei offiziellen `playerbarContainer.json`-Dokumenten die darin referenzierte `playlist.feedUrl` verfolgen, sofern der eingebettete Stream eindeutig zum aufgeloesten Sender passt
 - Feed-Probing kann parallel in Batches laufen (`NOWPLAYING_PARALLEL_*` in `app/config.py`)
+- Discovery-Crawl fuer Seed-Seiten und Script-Assets kann begrenzt parallel laufen (`DISCOVERY_*` in `app/config.py`)
 - Generische Icecast/Shoutcast-Statusquellen werden mitberuecksichtigt (`status-json.xsl`, `status.xsl`, `stats`)
 - Anzeige der tatsächlich genutzten Song-Quelle (`source_url`) im Quell-Details-Fenster
 - `Origin-only` aktiv mit optionaler `offizieller Player-Kette`:
@@ -25,6 +26,7 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Web-Fallback bei Sendernamen prueft mehrere Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`)
 - JSON-Feeds mit `starttime`/`duration` und Zustandsfeldern wie `playingMode` bevorzugen den aktuell aktiven Eintrag gegenueber vergangenen oder zukuenftigen Listeneintraegen
 - Feed-Daten werden auf Frische geprüft; veraltete `now`-Einträge werden verworfen
+- Redaktionelle HTML-Seiten (z. B. Podcast-/Artikel-Slugs ohne echte Now-Playing-Struktur) werden fuer direkte Feed-Probes generisch abgewertet bzw. aussortiert
 - Songanzeige nur bei eindeutigem `artist` + `title`
 - Best-Effort EPG-Probe (falls Sender EPG/SI.xml online bereitstellt)
 - Live-Log in separatem Fenster

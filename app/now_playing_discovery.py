@@ -15,15 +15,21 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from .config import (
+    DISCOVERY_CRAWL_MAX_WORKERS,
     DISCOVERY_MAX_CANDIDATES,
+    DISCOVERY_PAGE_FETCH_BUDGET,
+    DISCOVERY_PLAYERBAR_MAX_CONTAINERS,
+    DISCOVERY_PLAYERBAR_MAX_WORKERS,
     DISCOVERY_READ_BYTES,
     DISCOVERY_REQUEST_TIMEOUT_SECONDS,
+    DISCOVERY_SCRIPT_FETCH_BUDGET,
     MAX_NOWPLAYING_AGE_MINUTES,
     NOWPLAYING_PARALLEL_BATCH_SIZE,
     NOWPLAYING_PARALLEL_MAX_WORKERS,
     NOWPLAYING_PARALLEL_PROBING_ENABLED,
     NOWPLAYING_DURATION_GRACE_SECONDS,
     NOWPLAYING_CANDIDATE_KEYWORDS,
+    NOWPLAYING_HTML_EDITORIAL_TOKENS,
     NOWPLAYING_QUERY_CONTEXT_IGNORE_TOKENS,
     PROVIDER_BR_BASE_DOMAINS,
     PROVIDER_NDR_BASE_DOMAINS,
@@ -81,6 +87,9 @@ class NowPlayingDiscoveryService:
         self._log = log
         self._trusted_candidates: set[str] = set()
         self._linked_domains: set[str] = set()
+        self._crawl_max_workers = max(1, int(DISCOVERY_CRAWL_MAX_WORKERS))
+        self._playerbar_max_containers = max(1, int(DISCOVERY_PLAYERBAR_MAX_CONTAINERS))
+        self._playerbar_max_workers = max(1, int(DISCOVERY_PLAYERBAR_MAX_WORKERS))
         self._parallel_prob_enabled = bool(NOWPLAYING_PARALLEL_PROBING_ENABLED)
         self._parallel_max_workers = max(1, int(NOWPLAYING_PARALLEL_MAX_WORKERS))
         self._parallel_batch_size = max(1, int(NOWPLAYING_PARALLEL_BATCH_SIZE))
@@ -155,102 +164,131 @@ class NowPlayingDiscoveryService:
         station: StationMatch | None,
         stream_headers: dict[str, str],
     ) -> list[str]:
+        total_started = time.perf_counter()
         self._trusted_candidates = set()
         self._linked_domains = set()
+        phase_timings = {
+            "seed_fetch": 0.0,
+            "discovery_pages": 0.0,
+            "avcustom": 0.0,
+            "scripts": 0.0,
+            "nested_scripts": 0.0,
+            "generated": 0.0,
+            "official_player": 0.0,
+            "playerbar": 0.0,
+            "loverad": 0.0,
+            "ranking": 0.0,
+        }
 
         seeds = self._build_seed_urls(resolved, station, stream_headers)
         candidates = set()
         visited_pages = set()
-        discovery_page_budget = 4
-        script_fetch_budget = 6
+        discovery_page_budget = max(0, int(DISCOVERY_PAGE_FETCH_BUDGET))
+        script_fetch_budget = max(0, int(DISCOVERY_SCRIPT_FETCH_BUDGET))
         seed_documents: list[tuple[str, str]] = []
+        discovery_page_urls: list[str] = []
+        avcustom_urls: list[str] = []
+        script_urls: list[str] = []
+
+        def _remember_candidate(url: str) -> None:
+            if self._looks_like_feed_url(url):
+                candidates.add(url)
+                self._mark_trusted_candidate(url)
 
         for seed in seeds:
             visited_pages.add(seed)
-            if self._looks_like_feed_url(seed):
-                candidates.add(seed)
-                self._mark_trusted_candidate(seed)
+            _remember_candidate(seed)
 
-            if self._looks_like_stream_endpoint(seed):
-                continue
-
-            text, _ = self._fetch_text(seed)
-            if not text:
-                continue
-
+        seed_fetch_urls = [seed for seed in seeds if not self._looks_like_stream_endpoint(seed)]
+        phase_started = time.perf_counter()
+        seed_documents_batch = self._fetch_documents_parallel(seed_fetch_urls)
+        phase_timings["seed_fetch"] = time.perf_counter() - phase_started
+        for seed, text in seed_documents_batch:
             seed_documents.append((seed, text))
             extracted_urls = self._extract_urls_from_document(text, seed)
             for extracted in extracted_urls:
-                if self._looks_like_feed_url(extracted):
-                    candidates.add(extracted)
-                    self._mark_trusted_candidate(extracted)
-
+                _remember_candidate(extracted)
                 if (
-                    discovery_page_budget > 0
-                    and self._looks_like_discovery_page(extracted)
+                    self._looks_like_discovery_page(extracted)
                     and get_base_domain(extracted) == get_base_domain(seed)
-                    and extracted not in visited_pages
                 ):
-                    visited_pages.add(extracted)
-                    discovery_page_budget -= 1
-                    page_text, _ = self._fetch_text(extracted)
-                    if page_text:
-                        seed_documents.append((extracted, page_text))
-                        for nested in self._extract_urls_from_document(page_text, extracted):
-                            if self._looks_like_feed_url(nested):
-                                candidates.add(nested)
-                                self._mark_trusted_candidate(nested)
-
-                # Generic second-level discovery for player descriptor docs.
+                    discovery_page_urls.append(extracted)
                 if "avcustom" in extracted.lower() and get_base_domain(extracted) == get_base_domain(seed):
-                    sub_text, _ = self._fetch_text(extracted)
-                    if not sub_text:
-                        continue
-                    seed_documents.append((extracted, sub_text))
-                    for nested in self._extract_urls_from_document(sub_text, extracted):
-                        if self._looks_like_feed_url(nested):
-                            candidates.add(nested)
-                            self._mark_trusted_candidate(nested)
+                    avcustom_urls.append(extracted)
+            script_urls.extend(self._prioritize_script_asset_urls(extracted_urls, seed))
 
-            for script_url in self._prioritize_script_asset_urls(extracted_urls, seed):
-                if script_fetch_budget <= 0 or script_url in visited_pages:
-                    continue
-                visited_pages.add(script_url)
-                script_fetch_budget -= 1
-                script_text, _ = self._fetch_text(script_url)
-                if not script_text:
-                    continue
-                seed_documents.append((script_url, script_text))
-                nested_urls = self._extract_urls_from_document(script_text, script_url)
-                for nested in nested_urls:
-                    if self._looks_like_feed_url(nested):
-                        candidates.add(nested)
-                        self._mark_trusted_candidate(nested)
-                for nested_script_url in self._prioritize_script_asset_urls(nested_urls, seed):
-                    if script_fetch_budget <= 0 or nested_script_url in visited_pages:
-                        continue
-                    visited_pages.add(nested_script_url)
-                    script_fetch_budget -= 1
-                    nested_script_text, _ = self._fetch_text(nested_script_url)
-                    if not nested_script_text:
-                        continue
-                    seed_documents.append((nested_script_url, nested_script_text))
-                    for extracted_nested_feed in self._extract_urls_from_document(nested_script_text, nested_script_url):
-                        if self._looks_like_feed_url(extracted_nested_feed):
-                            candidates.add(extracted_nested_feed)
-                            self._mark_trusted_candidate(extracted_nested_feed)
+        discovery_fetch_urls, discovery_page_budget = self._take_budgeted_urls(
+            discovery_page_urls,
+            visited_pages,
+            discovery_page_budget,
+        )
+        phase_started = time.perf_counter()
+        discovery_documents = self._fetch_documents_parallel(discovery_fetch_urls)
+        phase_timings["discovery_pages"] = time.perf_counter() - phase_started
+        for page_url, page_text in discovery_documents:
+            seed_documents.append((page_url, page_text))
+            for nested in self._extract_urls_from_document(page_text, page_url):
+                _remember_candidate(nested)
 
+        avcustom_fetch_urls, _ = self._take_budgeted_urls(
+            avcustom_urls,
+            visited_pages,
+            max(0, len(avcustom_urls)),
+        )
+        phase_started = time.perf_counter()
+        avcustom_documents = self._fetch_documents_parallel(avcustom_fetch_urls)
+        phase_timings["avcustom"] = time.perf_counter() - phase_started
+        for doc_url, doc_text in avcustom_documents:
+            seed_documents.append((doc_url, doc_text))
+            for nested in self._extract_urls_from_document(doc_text, doc_url):
+                _remember_candidate(nested)
+
+        script_fetch_urls, script_fetch_budget = self._take_budgeted_urls(
+            script_urls,
+            visited_pages,
+            script_fetch_budget,
+        )
+        nested_script_urls: list[str] = []
+        phase_started = time.perf_counter()
+        script_documents = self._fetch_documents_parallel(script_fetch_urls)
+        phase_timings["scripts"] = time.perf_counter() - phase_started
+        for script_url, script_text in script_documents:
+            seed_documents.append((script_url, script_text))
+            nested_urls = self._extract_urls_from_document(script_text, script_url)
+            for nested in nested_urls:
+                _remember_candidate(nested)
+            nested_script_urls.extend(self._prioritize_script_asset_urls(nested_urls, script_url))
+
+        nested_script_fetch_urls, script_fetch_budget = self._take_budgeted_urls(
+            nested_script_urls,
+            visited_pages,
+            script_fetch_budget,
+        )
+        phase_started = time.perf_counter()
+        nested_script_documents = self._fetch_documents_parallel(nested_script_fetch_urls)
+        phase_timings["nested_scripts"] = time.perf_counter() - phase_started
+        for nested_script_url, nested_script_text in nested_script_documents:
+            seed_documents.append((nested_script_url, nested_script_text))
+            for extracted_nested_feed in self._extract_urls_from_document(nested_script_text, nested_script_url):
+                _remember_candidate(extracted_nested_feed)
+
+        phase_started = time.perf_counter()
         generated = self._build_generated_candidates(seed_documents, candidates, resolved, station)
+        phase_timings["generated"] = time.perf_counter() - phase_started
         for generated_url in generated:
             candidates.add(generated_url)
             self._mark_trusted_candidate(generated_url)
 
+        phase_started = time.perf_counter()
         official_player_feeds = self._discover_official_player_feed_urls(seed_documents, resolved, station)
+        phase_timings["official_player"] = time.perf_counter() - phase_started
         for feed_url in official_player_feeds:
             candidates.add(feed_url)
             self._mark_trusted_candidate(feed_url)
 
+        phase_started = time.perf_counter()
         playerbar_playlist_feeds = self._discover_playerbar_playlist_urls(seed_documents, resolved, station)
+        phase_timings["playerbar"] = time.perf_counter() - phase_started
         for feed_url in playerbar_playlist_feeds:
             candidates.add(feed_url)
             self._mark_trusted_candidate(feed_url)
@@ -264,11 +302,14 @@ class NowPlayingDiscoveryService:
             candidates.add(derived)
             self._mark_trusted_candidate(derived)
 
+        phase_started = time.perf_counter()
         loverad_flow_urls = self._discover_loverad_flow_urls(candidates, resolved, station)
+        phase_timings["loverad"] = time.perf_counter() - phase_started
         for flow_url in loverad_flow_urls:
             candidates.add(flow_url)
             self._mark_trusted_candidate(flow_url)
 
+        phase_started = time.perf_counter()
         normalized_candidates = self._dedupe_url_variants(candidates)
         context_filtered_candidates = {
             url
@@ -289,10 +330,27 @@ class NowPlayingDiscoveryService:
             for base in (get_base_domain(url) for url in self._trusted_candidates)
             if base
         }
+        phase_timings["ranking"] = time.perf_counter() - phase_started
         if limited:
             self._log(f"Now-Playing Kandidaten gefunden: {len(limited)}")
         else:
             self._log("Keine Now-Playing Kandidaten gefunden")
+        total_elapsed = time.perf_counter() - total_started
+        self._log(
+            "Discovery-Timing: "
+            f"seeds={phase_timings['seed_fetch']:.2f}s "
+            f"pages={phase_timings['discovery_pages']:.2f}s "
+            f"avcustom={phase_timings['avcustom']:.2f}s "
+            f"scripts={phase_timings['scripts']:.2f}s "
+            f"nested_scripts={phase_timings['nested_scripts']:.2f}s "
+            f"generated={phase_timings['generated']:.2f}s "
+            f"official_player={phase_timings['official_player']:.2f}s "
+            f"playerbar={phase_timings['playerbar']:.2f}s "
+            f"loverad={phase_timings['loverad']:.2f}s "
+            f"ranking={phase_timings['ranking']:.2f}s "
+            f"total={total_elapsed:.2f}s "
+            f"candidates={len(limited)}"
+        )
         return limited
 
     def fetch_now_playing(
@@ -864,6 +922,8 @@ class NowPlayingDiscoveryService:
         if "metadata/channel/" in path and (path.endswith(".json") or path.endswith("/")):
             return True
         if self._looks_like_html_nowplaying_endpoint(url):
+            if self._is_editorial_html_candidate(url):
+                return False
             return True
         return False
 
@@ -973,10 +1033,95 @@ class NowPlayingDiscoveryService:
         path = parsed.path.lower()
         if any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg")):
             return False
+        if self._is_editorial_html_candidate(url):
+            return False
         if path.endswith(".html") or path.endswith("/"):
             hints = ("stream", "livestream", "radio", "playlist", "onair", "now")
             return any(hint in path for hint in hints)
         return False
+
+    def _is_editorial_html_candidate(self, url: str) -> bool:
+        if not self._looks_like_html_nowplaying_endpoint(url):
+            return False
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        query = parsed.query.lower()
+        haystack = f"{path}?{query}"
+        last_segment = path.rsplit("/", 1)[-1]
+        has_dynamic_nowplaying_hint = any(
+            token in haystack
+            for token in (
+                "ssi=true",
+                "module=",
+                "box=",
+                "middlecolumnlist",
+                "reloadcontent",
+                "jsb_reloadcontent",
+                "now_on_air",
+                "nowonair",
+                "now-playing",
+                "currenttitle",
+                "currentsong",
+                "radiomodul",
+            )
+        )
+        if has_dynamic_nowplaying_hint:
+            return False
+        has_editorial_token = any(token in haystack for token in NOWPLAYING_HTML_EDITORIAL_TOKENS)
+        has_article_like_slug = last_segment.count("-") >= 4 or bool(re.search(r"-\d{2,4}(?:[./]|$)", last_segment))
+        if has_editorial_token and has_article_like_slug:
+            return True
+        if has_editorial_token and "playlist-" in haystack and not parsed.query:
+            return True
+        return False
+
+    def _take_budgeted_urls(
+        self,
+        urls: list[str],
+        visited_urls: set[str],
+        budget: int,
+    ) -> tuple[list[str], int]:
+        selected = []
+        remaining = max(0, int(budget))
+        for url in urls:
+            if remaining <= 0:
+                break
+            if not url or url in visited_urls:
+                continue
+            visited_urls.add(url)
+            selected.append(url)
+            remaining -= 1
+        return selected, remaining
+
+    def _fetch_documents_parallel(self, urls: list[str]) -> list[tuple[str, str]]:
+        ordered_urls = []
+        seen = set()
+        for url in urls:
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            ordered_urls.append(url)
+        if not ordered_urls:
+            return []
+        if len(ordered_urls) == 1:
+            text, _ = self._fetch_text(ordered_urls[0])
+            return [(ordered_urls[0], text)] if text else []
+
+        worker_count = max(1, min(self._crawl_max_workers, len(ordered_urls)))
+        results: dict[int, tuple[str, str]] = {}
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            future_map = {
+                pool.submit(self._fetch_text, url): idx for idx, url in enumerate(ordered_urls)
+            }
+            for future in as_completed(future_map):
+                idx = future_map[future]
+                try:
+                    text, _ = future.result()
+                except Exception:
+                    text = ""
+                if text:
+                    results[idx] = (ordered_urls[idx], text)
+        return [results[idx] for idx in range(len(ordered_urls)) if idx in results]
 
     def _looks_like_script_asset(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -2315,37 +2460,69 @@ class NowPlayingDiscoveryService:
 
         feeds = set()
         station_name = (station.name if station else "") or resolved.station_name or ""
-        for container_url in ordered_containers[:24]:
-            payload_text, content_type = self._fetch_text(container_url)
-            if not payload_text:
-                continue
-            if not self._is_json_candidate(container_url, content_type, payload_text):
-                continue
-            try:
-                payload = json.loads(payload_text)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            if not self._playerbar_container_matches(payload, container_url, resolved, station_name):
-                continue
+        candidate_containers = ordered_containers[: self._playerbar_max_containers]
+        if not candidate_containers:
+            return feeds
 
-            playlist = payload.get("playlist")
-            if not isinstance(playlist, dict):
-                continue
+        if len(candidate_containers) == 1 or self._playerbar_max_workers <= 1:
+            for container_url in candidate_containers:
+                feed_url = self._probe_playerbar_container(container_url, resolved, station_name)
+                if not feed_url:
+                    continue
+                feeds.add(feed_url)
+            return feeds
 
-            feed_url = self._extract_json_value(playlist, {"feedurl", "feed_url", "playlisturl", "playlist_url"})
-            if not feed_url:
-                continue
-            if not is_probable_url(feed_url):
-                feed_url = urljoin(container_url, feed_url)
-            if not is_probable_url(feed_url):
-                continue
-            if not self._looks_like_feed_url(feed_url):
-                continue
-            feeds.add(feed_url)
+        worker_count = max(1, min(self._playerbar_max_workers, len(candidate_containers)))
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            future_map = {
+                pool.submit(self._probe_playerbar_container, container_url, resolved, station_name): container_url
+                for container_url in candidate_containers
+            }
+            for future in as_completed(future_map):
+                try:
+                    feed_url = future.result()
+                except Exception:
+                    feed_url = ""
+                if not feed_url:
+                    continue
+                feeds.add(feed_url)
 
         return feeds
+
+    def _probe_playerbar_container(
+        self,
+        container_url: str,
+        resolved: ResolvedStream,
+        station_name: str,
+    ) -> str:
+        payload_text, content_type = self._fetch_text(container_url)
+        if not payload_text:
+            return ""
+        if not self._is_json_candidate(container_url, content_type, payload_text):
+            return ""
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        if not self._playerbar_container_matches(payload, container_url, resolved, station_name):
+            return ""
+
+        playlist = payload.get("playlist")
+        if not isinstance(playlist, dict):
+            return ""
+
+        feed_url = self._extract_json_value(playlist, {"feedurl", "feed_url", "playlisturl", "playlist_url"})
+        if not feed_url:
+            return ""
+        if not is_probable_url(feed_url):
+            feed_url = urljoin(container_url, feed_url)
+        if not is_probable_url(feed_url):
+            return ""
+        if not self._looks_like_feed_url(feed_url):
+            return ""
+        return feed_url
 
     def _extract_official_config_urls(self, documents: list[tuple[str, str]]) -> set[str]:
         config_urls = set()
@@ -2908,4 +3085,3 @@ class NowPlayingDiscoveryService:
                 except Exception:
                     return "", ""
             return "", ""
-

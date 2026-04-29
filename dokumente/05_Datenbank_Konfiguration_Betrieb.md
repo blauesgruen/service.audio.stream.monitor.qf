@@ -78,12 +78,20 @@ Wichtige Schalter:
   - Netzwerk-Timeout Stream/Lookup
 - `DISCOVERY_REQUEST_TIMEOUT_SECONDS`
   - Timeout pro Discovery-Request
+- `DISCOVERY_CRAWL_MAX_WORKERS`
+  - parallele Worker fuer den Discovery-Crawl vor dem eigentlichen Feed-Probing
+- `DISCOVERY_PAGE_FETCH_BUDGET`, `DISCOVERY_SCRIPT_FETCH_BUDGET`
+  - begrenzen die Tiefe/Breite des Discovery-Crawls fuer Unterseiten und Script-Assets
+- `DISCOVERY_PLAYERBAR_MAX_CONTAINERS`, `DISCOVERY_PLAYERBAR_MAX_WORKERS`
+  - begrenzen und parallelisieren die generische `playerbarContainer`-Auswertung
 - `DISCOVERY_MAX_CANDIDATES`
   - Begrenzung der Feed-Kandidaten
 - `MAX_NOWPLAYING_AGE_MINUTES`
   - harte Altersgrenze fuer Feed-Eintraege
 - `NOWPLAYING_DURATION_GRACE_SECONDS`
   - Toleranz ueber `start + duration` hinaus
+- `NOWPLAYING_HTML_EDITORIAL_TOKENS`
+  - generische Negativ-Tokens fuer redaktionelle HTML-Seiten ohne echte Now-Playing-Struktur
 - `EPG_REQUEST_TIMEOUT_SECONDS`
   - Timeout EPG-Probe
 
