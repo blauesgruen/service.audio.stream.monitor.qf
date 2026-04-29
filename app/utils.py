@@ -9,6 +9,7 @@ from .config import NON_ORIGIN_ASSET_BASE_DOMAINS, NON_ORIGIN_DIRECTORY_BASE_DOM
 
 TOKEN_SEPARATOR_RE = re.compile(r"[\W_]+", flags=re.UNICODE)
 UNICODE_LETTER_RE = re.compile(r"[^\W\d_]", flags=re.UNICODE)
+MOJIBAKE_HINT_RE = re.compile(r"(?:Ã.|Â.|â..)", flags=re.UNICODE)
 
 
 def is_probable_url(value: str) -> bool:
@@ -87,3 +88,14 @@ def is_mixed_alnum_token(token: str, min_length: int = 2) -> bool:
     has_digit = any(char.isdigit() for char in token)
     has_alpha = any(char.isalpha() for char in token)
     return has_digit and has_alpha
+
+
+def repair_mojibake_text(value: str) -> str:
+    text = str(value or "")
+    if not text or not MOJIBAKE_HINT_RE.search(text):
+        return text
+    try:
+        repaired = text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+    return repaired or text

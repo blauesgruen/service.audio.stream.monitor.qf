@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 from .config import REQUEST_TIMEOUT_SECONDS, STREAM_READ_BYTES, USER_AGENT
 from .models import SongInfo
 from .song_validation import is_valid_song_candidate
+from .utils import repair_mojibake_text
 
 
 class MetadataError(Exception):
@@ -68,6 +69,7 @@ class SongMetadataFetcher:
 
             metadata_block = response.read(metadata_length)
             raw_text = metadata_block.decode("utf-8", errors="ignore").strip("\x00")
+            raw_text = repair_mojibake_text(raw_text)
             stream_title = self._extract_stream_title(raw_text)
             source_headers = {key: value for key, value in response.headers.items()}
             station_name = response.headers.get("icy-name") or ""
@@ -91,14 +93,14 @@ class SongMetadataFetcher:
             clean = part.strip()
             if clean.lower().startswith("streamtitle="):
                 _, _, value = clean.partition("=")
-                return value.strip().strip("'").strip()
+                return repair_mojibake_text(value.strip().strip("'").strip())
         return ""
 
     def _split_artist_title(self, stream_title: str, station_name: str = "") -> tuple[str, str]:
         if " - " in stream_title:
             artist, title = stream_title.split(" - ", 1)
-            artist = artist.strip()
-            title = title.strip()
+            artist = repair_mojibake_text(artist.strip())
+            title = repair_mojibake_text(title.strip())
             if self._looks_like_song_pair(artist, title, station_name):
                 return artist, title
 
@@ -108,8 +110,8 @@ class SongMetadataFetcher:
             flags=re.IGNORECASE,
         )
         if match_de:
-            artist = match_de.group("artist").strip()
-            title = match_de.group("title").strip()
+            artist = repair_mojibake_text(match_de.group("artist").strip())
+            title = repair_mojibake_text(match_de.group("title").strip())
             if self._looks_like_song_pair(artist, title, station_name):
                 return artist, title
 
@@ -119,12 +121,12 @@ class SongMetadataFetcher:
             flags=re.IGNORECASE,
         )
         if match_en:
-            artist = match_en.group("artist").strip()
-            title = match_en.group("title").strip()
+            artist = repair_mojibake_text(match_en.group("artist").strip())
+            title = repair_mojibake_text(match_en.group("title").strip())
             if self._looks_like_song_pair(artist, title, station_name):
                 return artist, title
 
-        return "", stream_title.strip()
+        return "", repair_mojibake_text(stream_title.strip())
 
     def _looks_like_song_pair(self, artist: str, title: str, station_name: str = "") -> bool:
         return is_valid_song_candidate(artist, title, station_name=station_name)

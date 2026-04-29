@@ -37,8 +37,14 @@ from .config import (
     USER_AGENT,
 )
 from .models import ResolvedStream, SongInfo, StationMatch
-from .song_validation import is_valid_song_candidate
-from .utils import get_base_domain, is_mixed_alnum_token, is_probable_url, split_search_tokens
+from .song_validation import build_station_hints, compact_station_compare_text, is_valid_song_candidate
+from .utils import (
+    get_base_domain,
+    is_mixed_alnum_token,
+    is_probable_url,
+    repair_mojibake_text,
+    split_search_tokens,
+)
 
 TITLE_KEYS = {
     "title",
@@ -80,6 +86,46 @@ TIME_KEYS = {
 DURATION_KEYS = {"duration", "length", "duration_sec", "duration_seconds", "runtime"}
 HTML_TITLE_CLASS_KEYS = ("js_title", "songtitle", "tracktitle", "title", "titel", "track", "song", "songname", "trackname")
 HTML_ARTIST_CLASS_KEYS = ("js_artist", "interpret", "artist", "artistname", "performer", "band", "author")
+JSONP_WRAPPER_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$.]*\((?P<payload>.*)\)\s*;?\s*$", flags=re.DOTALL)
+GRAPHQL_ENDPOINT_RE = re.compile(r"https?://[^\"'`\s<>()]+/graphql\b", flags=re.IGNORECASE)
+GRAPHQL_STREAMS_QUERY = """
+query StreamQuery {
+  taxonomyTermList(bundles: ["streams"]) {
+    items {
+      ... on TaxonomyTermStreams {
+        id
+        label
+        fieldLink {
+          url {
+            path
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
+GRAPHQL_TRACKS_QUERY = """
+query TracksQuery($id: ID!) {
+  streamById(id: $id) {
+    name
+    streamValue {
+      date
+      track {
+        artist
+        duration
+        start_time
+        title
+      }
+    }
+  }
+}
+""".strip()
+GRAPHQL_TRACKS_MODE_PARAM = "_qf_np"
+GRAPHQL_TRACKS_MODE_VALUE = "graphql_stream_tracks"
+GRAPHQL_TRACKS_ID_PARAM = "stream_id"
+RADIOPLAYER_EVENT_TITLE_KEYS = {"name", "title", "song", "track"}
+RADIOPLAYER_EVENT_ARTIST_KEYS = {"artistname", "artist_name", "artist"}
 
 
 class NowPlayingDiscoveryService:
@@ -93,6 +139,7 @@ class NowPlayingDiscoveryService:
         self._parallel_prob_enabled = bool(NOWPLAYING_PARALLEL_PROBING_ENABLED)
         self._parallel_max_workers = max(1, int(NOWPLAYING_PARALLEL_MAX_WORKERS))
         self._parallel_batch_size = max(1, int(NOWPLAYING_PARALLEL_BATCH_SIZE))
+        self._graphql_stream_catalog_cache: dict[str, list[dict[str, str]]] = {}
 
     def is_trusted_candidate(self, url: str) -> bool:
         return url in self._trusted_candidates
@@ -176,6 +223,7 @@ class NowPlayingDiscoveryService:
             "generated": 0.0,
             "official_player": 0.0,
             "playerbar": 0.0,
+            "graphql": 0.0,
             "loverad": 0.0,
             "ranking": 0.0,
         }
@@ -294,6 +342,13 @@ class NowPlayingDiscoveryService:
             candidates.add(feed_url)
             self._mark_trusted_candidate(feed_url)
 
+        phase_started = time.perf_counter()
+        graphql_track_feeds = self._discover_graphql_track_feed_urls(document_index, resolved, station)
+        phase_timings["graphql"] = time.perf_counter() - phase_started
+        for feed_url in graphql_track_feeds:
+            candidates.add(feed_url)
+            self._mark_trusted_candidate(feed_url)
+
         derived_html_candidates = set()
         for candidate in list(candidates):
             for derived in self._generate_html_nowplaying_variants(candidate):
@@ -347,6 +402,7 @@ class NowPlayingDiscoveryService:
             f"generated={phase_timings['generated']:.2f}s "
             f"official_player={phase_timings['official_player']:.2f}s "
             f"playerbar={phase_timings['playerbar']:.2f}s "
+            f"graphql={phase_timings['graphql']:.2f}s "
             f"loverad={phase_timings['loverad']:.2f}s "
             f"ranking={phase_timings['ranking']:.2f}s "
             f"total={total_elapsed:.2f}s "
@@ -375,6 +431,8 @@ class NowPlayingDiscoveryService:
         return self._fetch_now_playing_parallel(candidate_list, station_name, started_at, max_elapsed_seconds)
 
     def _probe_feed_candidate(self, url: str) -> SongInfo | None:
+        if self._is_graphql_tracks_candidate(url):
+            return self._probe_graphql_tracks_candidate(url)
         request_url = url if self._looks_like_html_nowplaying_endpoint(url) else self._cache_bust_url(url)
         text, content_type = self._fetch_text(request_url)
         if not text:
@@ -712,6 +770,29 @@ class NowPlayingDiscoveryService:
         urls: list[str] = []
         seen_urls = set()
 
+        preferred_bases = []
+        canonical_match = re.search(
+            r"<link[^>]*rel=[\"'][^\"']*\bcanonical\b[^\"']*[\"'][^>]*href=[\"']([^\"']+)[\"']",
+            normalized_text,
+            flags=re.IGNORECASE,
+        )
+        base_href_match = re.search(
+            r"<base[^>]*href=[\"']([^\"']+)[\"']",
+            normalized_text,
+            flags=re.IGNORECASE,
+        )
+        for candidate_base in (
+            (canonical_match.group(1) if canonical_match else ""),
+            (base_href_match.group(1) if base_href_match else ""),
+        ):
+            candidate_base = html.unescape(str(candidate_base or "").strip())
+            if not candidate_base or not is_probable_url(candidate_base):
+                continue
+            if candidate_base in preferred_bases:
+                continue
+            preferred_bases.append(candidate_base)
+        join_bases = preferred_bases or [base_url]
+
         def _remember(raw_url: str) -> None:
             normalized = html.unescape(str(raw_url or "").strip())
             if not normalized:
@@ -729,13 +810,16 @@ class NowPlayingDiscoveryService:
         for match in re.findall(r"(?:href|src|data-[a-z0-9_-]+)=[\"']([^\"']+)[\"']", normalized_text, flags=re.IGNORECASE):
             if match.startswith("javascript:"):
                 continue
-            if match.startswith("www."):
+            if is_probable_url(match):
+                _remember(match)
+            elif match.startswith("www."):
                 _remember(f"https://{match}")
             elif match.startswith("//"):
                 base_scheme = urlparse(base_url).scheme or "https"
                 _remember(f"{base_scheme}:{match}")
             else:
-                _remember(urljoin(base_url, match))
+                for join_base in join_bases:
+                    _remember(urljoin(join_base, match))
 
         for match in re.findall(
             r"/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+(?:\.xml|\.json)(?:\?[^\"'\s<>()]+)?",
@@ -745,7 +829,8 @@ class NowPlayingDiscoveryService:
             if match.startswith("/www."):
                 _remember(f"https://{match.lstrip('/')}")
             else:
-                _remember(urljoin(base_url, match))
+                for join_base in join_bases:
+                    _remember(urljoin(join_base, match))
 
         for match in re.findall(
             r"/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+(?:\.html|\.htm)(?:\?[^\"'\s<>()]+)?",
@@ -772,7 +857,8 @@ class NowPlayingDiscoveryService:
             if match.startswith("/www."):
                 _remember(f"https://{match.lstrip('/')}")
             else:
-                _remember(urljoin(base_url, match))
+                for join_base in join_bases:
+                    _remember(urljoin(join_base, match))
 
         for match in re.findall(
             r"/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+(?:\.js)(?:\?[^\"'\s<>()]+)?",
@@ -782,9 +868,11 @@ class NowPlayingDiscoveryService:
             if match.startswith("/www."):
                 _remember(f"https://{match.lstrip('/')}")
             else:
-                _remember(urljoin(base_url, match))
+                for join_base in join_bases:
+                    _remember(urljoin(join_base, match))
 
-        parsed_base = urlparse(base_url)
+        effective_base = join_bases[0] if join_bases else base_url
+        parsed_base = urlparse(effective_base)
         base_origin = f"{parsed_base.scheme}://{parsed_base.netloc}" if parsed_base.scheme and parsed_base.netloc else ""
         relative_roots = []
         seen_relative_roots = set()
@@ -835,15 +923,17 @@ class NowPlayingDiscoveryService:
             relative_script_files.append(match)
 
         for relative_script_file in relative_script_files[:16]:
-            _remember(urljoin(base_url, relative_script_file))
+            for join_base in join_bases:
+                _remember(urljoin(join_base, relative_script_file))
 
         # Generic CMS pattern: entries like "something--100" often expose "*-avCustom.xml".
         for content_id in re.findall(r"([a-z0-9][a-z0-9-]{5,}--\d+)", normalized_text, flags=re.IGNORECASE):
             lower_id = content_id.lower()
             if not any(hint in lower_id for hint in ("live", "stream", "radio", "onair")):
                 continue
-            _remember(urljoin(base_url, f"/stream/{content_id}-avCustom.xml"))
-            _remember(urljoin(base_url, f"/{content_id}-avCustom.xml"))
+            for join_base in join_bases:
+                _remember(urljoin(join_base, f"/stream/{content_id}-avCustom.xml"))
+                _remember(urljoin(join_base, f"/{content_id}-avCustom.xml"))
 
         return urls
 
@@ -1131,7 +1221,7 @@ class NowPlayingDiscoveryService:
             return False
         if "video" in path:
             return False
-        hints = ("webcode", "player", "radio", "main", "app", "bundle", "chunk", "critical")
+        hints = ("webcode", "player", "radio", "main", "app", "bundle", "chunk", "critical", "entry")
         return any(hint in path for hint in hints)
 
     def _script_asset_priority(self, url: str) -> int:
@@ -1145,6 +1235,8 @@ class NowPlayingDiscoveryService:
             score += 50
         if "main" in path:
             score += 25
+        if "entry" in path:
+            score += 22
         if "chunk" in path:
             score += 20
         if "audio" in path:
@@ -1160,13 +1252,10 @@ class NowPlayingDiscoveryService:
         return score
 
     def _prioritize_script_asset_urls(self, urls: list[str], seed_url: str) -> list[str]:
-        seed_base = get_base_domain(seed_url)
         filtered = []
         seen = set()
         for url in urls:
             if not self._looks_like_script_asset(url):
-                continue
-            if seed_base and get_base_domain(url) != seed_base:
                 continue
             if url in seen:
                 continue
@@ -1255,7 +1344,10 @@ class NowPlayingDiscoveryService:
             return True
         if ".json" in lower:
             return True
-        return payload.strip().startswith("{") or payload.strip().startswith("[")
+        stripped = payload.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            return True
+        return bool(JSONP_WRAPPER_RE.match(stripped))
 
     def _parse_xml_payload(self, payload: str, source_url: str) -> SongInfo | None:
         try:
@@ -1343,12 +1435,15 @@ class NowPlayingDiscoveryService:
         return ""
 
     def _parse_json_payload(self, payload: str, source_url: str) -> SongInfo | None:
+        payload = self._unwrap_jsonp_payload(payload)
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
             return None
 
         candidates = self._extract_iris_flow_candidates(data)
+        candidates.extend(self._extract_radioplayer_event_candidates(data))
+        candidates.extend(self._extract_graphql_stream_track_candidates(data))
         br_candidates = self._extract_br_radio_candidates(data)
         if br_candidates:
             candidates.extend(br_candidates)
@@ -1445,6 +1540,115 @@ class NowPlayingDiscoveryService:
             source_kind="web_feed_json",
             source_url=source_url,
         )
+
+    def _extract_radioplayer_event_candidates(
+        self,
+        data: dict | list,
+    ) -> list[tuple[int, str, str, str, str, int | None]]:
+        if not isinstance(data, dict):
+            return []
+        results = data.get("results")
+        if not isinstance(results, dict):
+            return []
+
+        candidates: list[tuple[int, str, str, str, str, int | None]] = []
+
+        def add_candidate(node: dict, bucket: str) -> None:
+            if not isinstance(node, dict):
+                return
+            title = self._extract_json_value(node, TITLE_KEYS | RADIOPLAYER_EVENT_TITLE_KEYS).strip()
+            artist = self._extract_json_value(node, ARTIST_KEYS | RADIOPLAYER_EVENT_ARTIST_KEYS).strip()
+            if not title or not artist:
+                return
+            start_value = self._extract_json_value(node, {"starttime", "start_time", "start"}).strip()
+            stop_value = self._extract_json_value(node, {"stoptime", "stop_time", "stop", "end"}).strip()
+            duration_value = self._duration_from_time_range(start_value, stop_value)
+            age_minutes = self._age_minutes(start_value)
+
+            score = 40
+            if bucket == "now":
+                score += 260
+            elif bucket == "next":
+                score -= 120
+            if self._is_time_range_active(start_value, stop_value):
+                score += 280
+            elif self._is_time_range_expired(start_value, stop_value):
+                score -= 240
+
+            if age_minutes is not None:
+                if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
+                    score -= 160
+                elif age_minutes >= 0:
+                    score += 20
+
+            candidates.append((score, artist, title, start_value, duration_value, age_minutes))
+
+        now_node = results.get("now")
+        if isinstance(now_node, dict):
+            add_candidate(now_node, "now")
+        for bucket in ("previous", "next"):
+            nodes = results.get(bucket)
+            if isinstance(nodes, dict):
+                nodes = [nodes]
+            if not isinstance(nodes, list):
+                continue
+            for node in nodes:
+                add_candidate(node, bucket)
+
+        return candidates
+
+    def _extract_graphql_stream_track_candidates(
+        self,
+        data: dict | list,
+    ) -> list[tuple[int, str, str, str, str, int | None]]:
+        if not isinstance(data, dict):
+            return []
+        root = data.get("data")
+        if not isinstance(root, dict):
+            return []
+        stream = root.get("streamById")
+        if not isinstance(stream, dict):
+            return []
+        stream_values = stream.get("streamValue")
+        if isinstance(stream_values, dict):
+            stream_values = [stream_values]
+        if not isinstance(stream_values, list):
+            return []
+
+        candidates: list[tuple[int, str, str, str, str, int | None]] = []
+        for stream_value in stream_values:
+            if not isinstance(stream_value, dict):
+                continue
+            date_value = self._extract_json_value(stream_value, {"date"}).strip()
+            tracks = stream_value.get("track")
+            if isinstance(tracks, dict):
+                tracks = [tracks]
+            if not isinstance(tracks, list):
+                continue
+            for track in tracks:
+                if not isinstance(track, dict):
+                    continue
+                artist = self._extract_json_value(track, ARTIST_KEYS | RADIOPLAYER_EVENT_ARTIST_KEYS).strip()
+                title = self._extract_json_value(track, TITLE_KEYS | RADIOPLAYER_EVENT_TITLE_KEYS).strip()
+                start_time = self._extract_json_value(track, {"start_time", "starttime", "start"}).strip()
+                duration_value = self._extract_json_value(track, DURATION_KEYS).strip()
+                start_value = self._combine_date_and_time(date_value, start_time)
+                if not artist or not title or not start_value or not duration_value:
+                    continue
+
+                age_minutes = self._age_minutes(start_value)
+                score = 40
+                score += self._json_time_window_score(start_value, duration_value)
+
+                if age_minutes is not None:
+                    if age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
+                        score -= 140
+                    elif age_minutes >= 0:
+                        score += 20
+
+                candidates.append((score, artist, title, start_value, duration_value, age_minutes))
+
+        return candidates
 
     def _extract_iris_flow_candidates(
         self,
@@ -1854,6 +2058,15 @@ class NowPlayingDiscoveryService:
             return "", ""
         return artist, title
 
+    def _unwrap_jsonp_payload(self, payload: str) -> str:
+        text = str(payload or "").strip()
+        if not text:
+            return ""
+        match = JSONP_WRAPPER_RE.match(text)
+        if not match:
+            return text
+        return (match.group("payload") or "").strip()
+
     def _looks_like_html_header_value(self, title: str, artist: str) -> bool:
         title_lower = (title or "").strip().lower()
         artist_lower = (artist or "").strip().lower()
@@ -2154,7 +2367,7 @@ class NowPlayingDiscoveryService:
         text = html.unescape(value or "")
         text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"\s+", " ", text)
-        return text.strip()
+        return repair_mojibake_text(text.strip())
 
     def _walk_json_objects(self, value):
         if isinstance(value, dict):
@@ -2172,7 +2385,7 @@ class NowPlayingDiscoveryService:
             if key_norm not in normalized_keyset:
                 continue
             if isinstance(value, str):
-                return value.strip()
+                return repair_mojibake_text(value.strip())
             if isinstance(value, (int, float)):
                 return str(value)
         return ""
@@ -2245,6 +2458,15 @@ class NowPlayingDiscoveryService:
         text = (value or "").strip()
         if not text:
             return None
+
+        if re.fullmatch(r"\d{10,13}", text):
+            raw = int(text)
+            if len(text) == 13:
+                raw = raw // 1000
+            try:
+                return datetime.fromtimestamp(raw, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
 
         local_match = re.match(
             r"^(?P<day>\d{1,2})\.(?P<month>\d{1,2})\.(?P<year>\d{4})\s*,?\s*(?P<hour>\d{1,2})[.:](?P<minute>\d{2})(?::(?P<second>\d{2}))?\s*(?:uhr)?$",
@@ -2409,6 +2631,192 @@ class NowPlayingDiscoveryService:
                     candidates.add(f"https://{source_host}/channels/{channel_id}/current-track")
 
         return candidates
+
+    def _discover_graphql_track_feed_urls(
+        self,
+        documents: list[tuple[str, str, list[str]]],
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> set[str]:
+        endpoints = self._extract_graphql_track_endpoints(documents)
+        if not endpoints:
+            return set()
+
+        feeds = set()
+        ordered_endpoints = sorted(endpoints)
+        worker_count = max(1, min(self._crawl_max_workers, len(ordered_endpoints)))
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            future_map = {
+                pool.submit(self._fetch_graphql_track_feed_urls_for_endpoint, endpoint, resolved, station): endpoint
+                for endpoint in ordered_endpoints
+            }
+            for future in as_completed(future_map):
+                try:
+                    feeds.update(future.result())
+                except Exception:
+                    continue
+        return feeds
+
+    def _extract_graphql_track_endpoints(
+        self,
+        documents: list[tuple[str, str, list[str]]],
+    ) -> set[str]:
+        endpoints = set()
+        for _, text, _ in documents:
+            if not text:
+                continue
+            lowered = text.lower()
+            if "streambyid" not in lowered or "taxonomytermlist" not in lowered:
+                continue
+            for match in GRAPHQL_ENDPOINT_RE.findall(text):
+                endpoints.add(match)
+        return endpoints
+
+    def _fetch_graphql_track_feed_urls_for_endpoint(
+        self,
+        endpoint: str,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> set[str]:
+        catalog = self._fetch_graphql_stream_catalog(endpoint)
+        if not catalog:
+            return set()
+
+        feeds = set()
+        for entry in self._match_graphql_stream_catalog_entries(catalog, resolved, station):
+            stream_id = str(entry.get("id") or "").strip()
+            if stream_id:
+                feeds.add(self._build_graphql_tracks_candidate_url(endpoint, stream_id))
+        return feeds
+
+    def _fetch_graphql_stream_catalog(self, endpoint: str) -> list[dict[str, str]]:
+        cached = self._graphql_stream_catalog_cache.get(endpoint)
+        if cached is not None:
+            return list(cached)
+
+        payload = self._post_graphql_json(endpoint, GRAPHQL_STREAMS_QUERY)
+        root = payload.get("data") if isinstance(payload, dict) else None
+        taxonomy = root.get("taxonomyTermList") if isinstance(root, dict) else None
+        items = taxonomy.get("items") if isinstance(taxonomy, dict) else None
+        if not isinstance(items, list):
+            self._graphql_stream_catalog_cache[endpoint] = []
+            return []
+
+        catalog = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            stream_id = str(item.get("id") or "").strip()
+            label = str(item.get("label") or "").strip()
+            field_link = item.get("fieldLink")
+            url_root = field_link.get("url") if isinstance(field_link, dict) else None
+            stream_url = str(url_root.get("path") or "").strip() if isinstance(url_root, dict) else ""
+            if stream_id and stream_url:
+                catalog.append({"id": stream_id, "label": label, "url": stream_url})
+
+        self._graphql_stream_catalog_cache[endpoint] = list(catalog)
+        return catalog
+
+    def _match_graphql_stream_catalog_entries(
+        self,
+        catalog: list[dict[str, str]],
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> list[dict[str, str]]:
+        comparable_urls = {
+            self._normalize_stream_match_url(url)
+            for url in (
+                resolved.input_url,
+                resolved.resolved_url,
+                resolved.delivery_url,
+                station.stream_url if station else "",
+            )
+            if self._normalize_stream_match_url(url)
+        }
+        station_hints = build_station_hints((station.name if station else "", resolved.station_name or ""))
+        compact_hints = {compact_station_compare_text(hint) for hint in station_hints if compact_station_compare_text(hint)}
+
+        exact_matches = []
+        label_matches = []
+        for entry in catalog:
+            entry_url = self._normalize_stream_match_url(entry.get("url") or "")
+            if entry_url and entry_url in comparable_urls:
+                exact_matches.append(entry)
+                continue
+
+            label_compact = compact_station_compare_text(entry.get("label") or "")
+            path_compact = compact_station_compare_text(urlparse(entry.get("url") or "").path)
+            if any(hint and (hint in label_compact or hint in path_compact) for hint in compact_hints):
+                label_matches.append(entry)
+
+        return exact_matches or label_matches[:2]
+
+    def _normalize_stream_match_url(self, url: str) -> str:
+        parsed = urlparse(str(url or "").strip())
+        if not parsed.netloc:
+            return ""
+        path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
+        return f"{parsed.netloc.lower()}{path.lower()}"
+
+    def _build_graphql_tracks_candidate_url(self, endpoint: str, stream_id: str) -> str:
+        parsed = urlparse(endpoint)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query[GRAPHQL_TRACKS_MODE_PARAM] = GRAPHQL_TRACKS_MODE_VALUE
+        query[GRAPHQL_TRACKS_ID_PARAM] = str(stream_id)
+        return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+
+    def _is_graphql_tracks_candidate(self, url: str) -> bool:
+        parsed = urlparse(str(url or "").strip())
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        return query.get(GRAPHQL_TRACKS_MODE_PARAM) == GRAPHQL_TRACKS_MODE_VALUE and bool(query.get(GRAPHQL_TRACKS_ID_PARAM))
+
+    def _probe_graphql_tracks_candidate(self, url: str) -> SongInfo | None:
+        parsed = urlparse(url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        stream_id = str(query.get(GRAPHQL_TRACKS_ID_PARAM) or "").strip()
+        if not stream_id:
+            return None
+        endpoint = urlunparse(parsed._replace(query=""))
+        payload = self._post_graphql_json(endpoint, GRAPHQL_TRACKS_QUERY, variables={"id": stream_id})
+        if not payload:
+            return None
+        return self._parse_json_payload(json.dumps(payload), url)
+
+    def _post_graphql_json(
+        self,
+        endpoint: str,
+        query_text: str,
+        variables: dict | None = None,
+        *,
+        context=None,
+    ) -> dict | list | None:
+        body = {"query": query_text}
+        if variables:
+            body["variables"] = variables
+        request = Request(
+            endpoint,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "User-Agent": USER_AGENT,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urlopen(request, timeout=DISCOVERY_REQUEST_TIMEOUT_SECONDS, context=context) as response:
+                payload = response.read(DISCOVERY_READ_BYTES).decode("utf-8", errors="ignore")
+        except URLError as err:
+            if context is None and isinstance(err.reason, ssl.SSLCertVerificationError):
+                insecure_context = ssl._create_unverified_context()
+                return self._post_graphql_json(endpoint, query_text, variables, context=insecure_context)
+            return None
+        except Exception:
+            return None
+
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return None
 
     def _discover_official_player_feed_urls(
         self,
@@ -2963,18 +3371,36 @@ class NowPlayingDiscoveryService:
         if not start_at or not end_at:
             return False
 
-        if start_at.tzinfo is None:
-            start_at = start_at.replace(tzinfo=timezone.utc)
-        else:
-            start_at = start_at.astimezone(timezone.utc)
+        start_ref, now_ref = self._normalize_window_datetimes(start_at)
+        end_ref, _ = self._normalize_window_datetimes(end_at)
+        return start_ref <= now_ref <= end_ref
 
-        if end_at.tzinfo is None:
-            end_at = end_at.replace(tzinfo=timezone.utc)
-        else:
-            end_at = end_at.astimezone(timezone.utc)
+    def _is_time_range_expired(self, start_value: str, end_value: str) -> bool:
+        start_at = self._parse_datetime(start_value)
+        end_at = self._parse_datetime(end_value)
+        if not start_at or not end_at:
+            return False
+        end_ref, now_ref = self._normalize_window_datetimes(end_at)
+        return now_ref > end_ref
 
-        now_utc = datetime.now(timezone.utc)
-        return start_at <= now_utc <= end_at
+    def _duration_from_time_range(self, start_value: str, stop_value: str) -> str:
+        start_at = self._parse_datetime(start_value)
+        stop_at = self._parse_datetime(stop_value)
+        if not start_at or not stop_at:
+            return ""
+        delta_seconds = int((stop_at - start_at).total_seconds())
+        if delta_seconds <= 0:
+            return ""
+        return str(delta_seconds)
+
+    def _combine_date_and_time(self, date_value: str, time_value: str) -> str:
+        date_text = str(date_value or "").strip()
+        time_text = str(time_value or "").strip()
+        if not date_text or not time_text:
+            return ""
+        if "T" in time_text or " " in time_text:
+            return time_text
+        return f"{date_text} {time_text}"
 
     def _duration_seconds(self, value: str) -> int | None:
         text = (value or "").strip()
@@ -3004,17 +3430,13 @@ class NowPlayingDiscoveryService:
         if duration_seconds <= 0 or duration_seconds > 4 * 3600:
             return False
 
-        if start_at.tzinfo is None:
-            start_utc = start_at.replace(tzinfo=timezone.utc)
-        else:
-            start_utc = start_at.astimezone(timezone.utc)
-        now_utc = datetime.now(timezone.utc)
+        start_ref, now_ref = self._normalize_window_datetimes(start_at)
 
-        if now_utc < (start_utc - timedelta(seconds=120)):
+        if now_ref < (start_ref - timedelta(seconds=120)):
             return False
 
-        end_utc = start_utc + timedelta(seconds=duration_seconds + NOWPLAYING_DURATION_GRACE_SECONDS)
-        return start_utc <= now_utc <= end_utc
+        end_ref = start_ref + timedelta(seconds=duration_seconds + NOWPLAYING_DURATION_GRACE_SECONDS)
+        return start_ref <= now_ref <= end_ref
 
     def _is_duration_window_expired(self, start_value: str, duration_value: str) -> bool:
         start_at = self._parse_datetime(start_value)
@@ -3024,15 +3446,18 @@ class NowPlayingDiscoveryService:
         if duration_seconds <= 0 or duration_seconds > 4 * 3600:
             return False
 
-        if start_at.tzinfo is None:
-            age_seconds = (datetime.now() - start_at).total_seconds()
-        else:
-            age_seconds = (datetime.now(timezone.utc) - start_at.astimezone(timezone.utc)).total_seconds()
+        start_ref, now_ref = self._normalize_window_datetimes(start_at)
+        age_seconds = (now_ref - start_ref).total_seconds()
 
         if age_seconds < -120:
             return False
 
         return age_seconds > (duration_seconds + NOWPLAYING_DURATION_GRACE_SECONDS)
+
+    def _normalize_window_datetimes(self, value: datetime) -> tuple[datetime, datetime]:
+        if value.tzinfo is None:
+            return value, datetime.now()
+        return value.astimezone(timezone.utc), datetime.now(timezone.utc)
 
     def _cache_bust_url(self, url: str) -> str:
         if not url:
