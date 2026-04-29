@@ -103,6 +103,7 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_NO_HIT_CONFIRM = 1
         self.QF_EMPTY_CONFIRM = 1
         self.QF_STALE_FEED_DROP_SECONDS = 180.0
+        self.QF_REAPPEAR_BLOCK_SECONDS = 600.0
         self.QF_FEED_RETRY_ATTEMPTS = 3
         self.QF_FEED_RETRY_DELAY_SECONDS = 0.35
         self.QF_STATE_MAX_STATIONS = 64
@@ -204,6 +205,7 @@ class QFBridgeService(xbmc.Monitor):
                 QF_NO_HIT_CONFIRM,
                 QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY,
                 QF_PHASE_TIMING_PRECISION,
+                QF_REAPPEAR_BLOCK_SECONDS,
                 QF_RESULT_CACHE_ENABLED,
                 QF_RESULT_CACHE_TTL_SECONDS,
                 QF_RESULT_CACHE_USE_ONLY_ON_VERIFIED_SOURCE_MISS,
@@ -262,6 +264,7 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_NO_HIT_CONFIRM = max(1, int(QF_NO_HIT_CONFIRM))
         self.QF_EMPTY_CONFIRM = max(1, int(QF_EMPTY_CONFIRM))
         self.QF_STALE_FEED_DROP_SECONDS = max(10.0, float(QF_STALE_FEED_DROP_SECONDS))
+        self.QF_REAPPEAR_BLOCK_SECONDS = max(0.0, float(QF_REAPPEAR_BLOCK_SECONDS))
         self.QF_FEED_RETRY_ATTEMPTS = max(1, int(QF_FEED_RETRY_ATTEMPTS))
         self.QF_FEED_RETRY_DELAY_SECONDS = max(0.0, float(QF_FEED_RETRY_DELAY_SECONDS))
         self.QF_STATE_MAX_STATIONS = max(16, int(QF_STATE_MAX_STATIONS))
@@ -1219,12 +1222,16 @@ class QFBridgeService(xbmc.Monitor):
             "last_reason": "",
             "last_no_hit_reason": "",
             "last_meta": {},
+            "last_pair_fingerprint": "",
+            "last_pair_first_seen_ts": 0.0,
             "stream_verify_pair_key": "",
             "stream_verify_count": 0,
             "stream_verify_ts": 0.0,
             "pending_hit_key": "",
             "pending_hit_count": 0,
             "pending_hit_ts": 0.0,
+            "recently_cleared_pair_fingerprint": "",
+            "recently_cleared_pair_ts": 0.0,
             "no_hit_streak": 0,
             "empty_streak": 0,
             "updated_ts": 0.0,
@@ -1264,6 +1271,62 @@ class QFBridgeService(xbmc.Monitor):
             request_gap=extra.pop("request_gap", ""),
             **extra,
         )
+
+    def _build_pair_fingerprint(self, artist="", title="", source="", source_url=""):
+        artist_value = str(artist or "").strip().lower()
+        title_value = str(title or "").strip().lower()
+        source_value = str(source or "").strip().lower()
+        source_url_value = str(source_url or "").strip().lower()
+        if not artist_value or not title_value:
+            return ""
+        return "|".join((artist_value, title_value, source_value, source_url_value))
+
+    def _build_result_pair_fingerprint(self, result):
+        result_obj = result if isinstance(result, dict) else {}
+        meta = result_obj.get("meta") or {}
+        return self._build_pair_fingerprint(
+            artist=result_obj.get("artist") or "",
+            title=result_obj.get("title") or "",
+            source=result_obj.get("source") or "",
+            source_url=meta.get("source_url") or "",
+        )
+
+    def _remember_recently_cleared_pair(self, state, now_ts):
+        pair_fingerprint = str(state.get("last_pair_fingerprint") or "").strip()
+        if not pair_fingerprint:
+            pair_fingerprint = self._build_pair_fingerprint(
+                artist=state.get("last_artist") or "",
+                title=state.get("last_title") or "",
+                source=state.get("last_source") or "",
+                source_url=(state.get("last_meta") or {}).get("source_url") or "",
+            )
+        if not pair_fingerprint:
+            return
+        state["recently_cleared_pair_fingerprint"] = pair_fingerprint
+        state["recently_cleared_pair_ts"] = float(now_ts or 0.0)
+
+    def _clear_recently_cleared_pair(self, state):
+        state["recently_cleared_pair_fingerprint"] = ""
+        state["recently_cleared_pair_ts"] = 0.0
+
+    def _get_recently_cleared_reappearance_block(self, state, result, now_ts):
+        block_seconds = float(self.QF_REAPPEAR_BLOCK_SECONDS or 0.0)
+        if block_seconds <= 0.0:
+            return False, 0.0
+        pair_fingerprint = self._build_result_pair_fingerprint(result)
+        if not pair_fingerprint:
+            return False, 0.0
+        cleared_fingerprint = str(state.get("recently_cleared_pair_fingerprint") or "").strip()
+        cleared_ts = float(state.get("recently_cleared_pair_ts") or 0.0)
+        if not cleared_fingerprint or cleared_ts <= 0.0:
+            return False, 0.0
+        age = max(0.0, float(now_ts or 0.0) - cleared_ts)
+        if age > block_seconds:
+            self._clear_recently_cleared_pair(state)
+            return False, 0.0
+        if pair_fingerprint != cleared_fingerprint:
+            return False, 0.0
+        return True, max(0.0, block_seconds - age)
 
     def _apply_qf_parity_policy(self, station_key, result, request_ts=0.0):
         state = self._get_station_state(station_key)
@@ -1319,10 +1382,39 @@ class QFBridgeService(xbmc.Monitor):
             state["last_source"] = ""
             state["last_reason"] = ""
             state["last_meta"] = {}
+            state["last_pair_fingerprint"] = ""
+            state["last_pair_first_seen_ts"] = 0.0
             state["last_hit_ts"] = 0.0
             state["last_strong_hit_ts"] = 0.0
 
         pending_bypassed = False
+        if status == "hit" and artist and title:
+            blocked_reappearance, block_remaining = self._get_recently_cleared_reappearance_block(
+                state,
+                result,
+                now,
+            )
+            if blocked_reappearance:
+                status = "no_hit"
+                reason = "reappeared_recently_cleared_pair"
+                artist = ""
+                title = ""
+                source = ""
+                meta = {
+                    **meta,
+                    "reappeared_recently_cleared_pair": True,
+                    "reappear_block_seconds": round(float(self.QF_REAPPEAR_BLOCK_SECONDS), 3),
+                    "reappear_block_remaining": round(block_remaining, 3),
+                }
+                result = {
+                    "status": status,
+                    "artist": artist,
+                    "title": title,
+                    "source": source,
+                    "reason": reason,
+                    "meta": meta,
+                }
+
         if status == "hit" and artist and title:
             has_last_pair_before = bool(state.get("last_artist") and state.get("last_title"))
             stream_pair_state = str(meta.get("stream_pair_state") or "")
@@ -1405,7 +1497,7 @@ class QFBridgeService(xbmc.Monitor):
                 )
                 reference_ts = float(state.get("last_strong_hit_ts") or 0.0)
                 if reference_ts <= 0.0:
-                    reference_ts = float(state.get("last_hit_ts") or 0.0)
+                    reference_ts = float(state.get("last_pair_first_seen_ts") or 0.0)
                 weak_age = (now - reference_ts) if reference_ts > 0.0 else 0.0
                 if same_pair and reference_ts > 0.0 and weak_age > stale_feed_drop_seconds:
                     status = "no_hit"
@@ -1432,6 +1524,12 @@ class QFBridgeService(xbmc.Monitor):
             stream_pair_state = str(meta.get("stream_pair_state") or "")
             is_feed_hit = str(source).startswith("web_feed_")
             weak_stream_signal = stream_pair_state in {"", "no_candidate", "missing_field"}
+            pair_fingerprint = self._build_result_pair_fingerprint(result)
+            if pair_fingerprint and pair_fingerprint != str(state.get("last_pair_fingerprint") or ""):
+                state["last_pair_fingerprint"] = pair_fingerprint
+                state["last_pair_first_seen_ts"] = now
+            elif pair_fingerprint and float(state.get("last_pair_first_seen_ts") or 0.0) <= 0.0:
+                state["last_pair_first_seen_ts"] = now
 
             state["last_hit_ts"] = now
             if not (is_feed_hit and weak_stream_signal):
@@ -1444,6 +1542,8 @@ class QFBridgeService(xbmc.Monitor):
             state["last_meta"] = dict(meta)
             state["no_hit_streak"] = 0
             state["empty_streak"] = 0
+            if pair_fingerprint and pair_fingerprint != str(state.get("recently_cleared_pair_fingerprint") or ""):
+                self._clear_recently_cleared_pair(state)
             self._trace_qf_decision(
                 station_key,
                 "accept_hit",
@@ -1502,6 +1602,7 @@ class QFBridgeService(xbmc.Monitor):
 
         # Song-Ende priorisieren: bestätigte no-hit/empty-Signale dürfen Hold sofort beenden.
         if no_hit_confirmed or empty_confirmed:
+            self._remember_recently_cleared_pair(state, now)
             _clear_last_hit_state()
             state["no_hit_streak"] = 0
             state["empty_streak"] = 0
