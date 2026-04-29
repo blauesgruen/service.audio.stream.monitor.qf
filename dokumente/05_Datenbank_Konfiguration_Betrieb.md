@@ -97,6 +97,7 @@ Wichtige QF-Schalter:
 - `QF_VERIFIED_PROBE_MISS_RETURNS_NO_HIT`
 - `QF_HOLD_SECONDS`, `QF_HOLD_SECONDS_MAX`
 - `QF_STALE_FEED_DROP_SECONDS`
+- `QF_REAPPEAR_BLOCK_SECONDS`
 - `QF_STATION_KEY_NAME_FALLBACK_ENABLED`
 - `QF_STATION_KEY_NAME_FALLBACK_MIN_TOKENS`
 - `QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES`
@@ -116,6 +117,7 @@ Wichtige QF-Schalter:
 - Bei Fastpath-Probe-Miss (Feed/ICY liefert aktuell kein gueltiges Paar) wird der Cache ebenfalls uebergangen (`result_cache_bypassed_verified_probe_state`) und optional direkt `no_hit` geliefert.
 - Der effektive Hold ist auf `QF_HOLD_SECONDS_MAX` gedeckelt (auch wenn `QF_HOLD_SECONDS` hoeher gesetzt wird).
 - Feed-only-Stale-Drops greifen erst nach `QF_STALE_FEED_DROP_SECONDS`, um kurze Statusphasen nicht als Songende zu fehlinterpretieren.
+- Nach bestaetigtem Songende blockt ASM-QF ein identisches Wiederauftauchen desselben Paares aus derselben Quelle fuer `QF_REAPPEAR_BLOCK_SECONDS` (Default 600s).
 
 ## Troubleshooting
 
@@ -148,6 +150,8 @@ Wenn trotzdem veraltet:
 
 - Feed liefert selbst veraltete Daten
 - oder relevante Felder sind nicht vorhanden
+- oder dieselben stale Metadaten tauchen spaeter erneut auf; in Kodi blockt die Parity-Schicht ein
+  identisches Wiederauftauchen deshalb fuer die konfigurierte Sperrzeit
 
 ### 4) "Keine Quelle mit eindeutigem Artist"
 

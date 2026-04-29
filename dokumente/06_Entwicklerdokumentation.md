@@ -308,6 +308,11 @@ Parity-Detail:
 - Hold-Zeit ist gedeckelt: `effective_hold = min(QF_HOLD_SECONDS, QF_HOLD_SECONDS_MAX)`.
 - Ein Feed-only-Hit wird erst nach `QF_STALE_FEED_DROP_SECONDS` als stale-only abgewertet.
 - Bei bestaetigtem Songende wird der letzte Hit-Status atomar geloescht (keine teilweisen State-Resets).
+- Danach merkt sich ASM-QF das zuletzt beendete Paar (`artist/title/source/source_url`) fuer
+  `QF_REAPPEAR_BLOCK_SECONDS`; ein identisches Wiederauftauchen wird in dieser Zeitspanne
+  als `no_hit` unterdrueckt.
+- Der Feed-only-Stale-Guard verankert sich am `first_seen` des aktuellen Paars statt an einem
+  rollierenden letzten Hit-Timestamp.
 
 Supersede-Policy:
 
@@ -329,6 +334,7 @@ Supersede-Policy:
 - `QF_HOLD_SECONDS`
 - `QF_HOLD_SECONDS_MAX`
 - `QF_STALE_FEED_DROP_SECONDS`
+- `QF_REAPPEAR_BLOCK_SECONDS`
 - `QF_NO_HIT_CONFIRM`
 - `QF_EMPTY_CONFIRM`
 
@@ -401,5 +407,4 @@ Manueller Funktionstest:
 - `app/config.py`
 - `app/utils.py`
 - `app/live_logger.py`
-
 

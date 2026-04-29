@@ -196,12 +196,18 @@ Die Kodi-Bridge (`ASM-QF`) nutzt zusaetzlich eine Parity-Schicht fuer stabile En
 - `QF_HOLD_SECONDS` wird durch `QF_HOLD_SECONDS_MAX` begrenzt (aktuell max. 3.0s).
 - Ein schwacher Feed-only-Hit (`web_feed_*` + fehlendes klares Stream-Signal) wird nicht sofort
   in `no_hit` abgewertet, sondern erst nach `QF_STALE_FEED_DROP_SECONDS` (konservativ, aktuell 180s).
+- Nach bestaetigtem Songende wird das beendete Paar fuer `QF_REAPPEAR_BLOCK_SECONDS`
+  (Default 600s) zwischengespeichert; kommt exakt dasselbe Paar aus derselben Quelle zurueck,
+  liefert die Bridge weiter `no_hit` statt den Titel sofort erneut an Kodi zu geben.
+- Der Feed-only-Stale-Guard nutzt dafuer einen stabilen `first_seen`-Zeitanker pro Paar, damit
+  sich dauerhaft gleiche schwache Feed-Treffer nicht ueber laufende Requests selbst frisch halten.
 - Ziel: kurze Jingle-/Status-Phasen ueberbruecken, ohne echte Songwechsel dauerhaft zu maskieren.
 
 Wichtig:
 
 - Songende bleibt priorisiert: bei bestaetigtem `no_hit` wird der letzte Songzustand beendet.
 - Das reduziert `hit -> no_hit -> hit`-Pendeln bei verzoegerten Feed-/ICY-Zyklen.
+- Die Reappearance-Sperre greift nur fuer exakt identisches Paar plus identische Quelle.
 
 ## Name-Varianten / station_key-Fallback
 
@@ -256,6 +262,5 @@ Damit werden reine Webradio-Streams haeufig robuster gefunden, ohne sender-spezi
 - Ohne eindeutige Tokens in Quelle bleibt nur best-effort.
 
 Der Ansatz bleibt trotzdem robust, weil er mehrere Quellen parallel bewertet und nur eindeutige Daten akzeptiert.
-
 
 

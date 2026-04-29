@@ -114,6 +114,8 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - Feed-only-Hits mit schwachem Stream-Signal werden nicht mehr nach wenigen Sekunden verworfen,
   sondern erst nach `QF_STALE_FEED_DROP_SECONDS` (konservatives Drop-Fenster).
 - Bei bestaetigtem Songende (`no_hit`/`empty` bestaetigt) wird der letzte Hit-Status atomar geloescht.
+- Danach merkt sich ASM-QF das zuletzt beendete Paar (`artist/title/source/source_url`) und blockt
+  ein identisches Wiederauftauchen fuer `QF_REAPPEAR_BLOCK_SECONDS` (Default 600s).
 
 ### station_key-Fallback
 

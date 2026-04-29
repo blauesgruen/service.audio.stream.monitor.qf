@@ -40,6 +40,8 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Vollkette (Lookup -> Resolve -> ICY -> Discovery) laeuft nur, wenn Fastpath und Result-Cache keinen Treffer liefern oder explizit erforderlich sind
 - QF-Parity mit begrenztem Hold (`QF_HOLD_SECONDS_MAX`) fuer stabile, aber schnelle Song-Ende-Erkennung
 - Konservatives Feed-Stale-Drop-Fenster (`QF_STALE_FEED_DROP_SECONDS`) gegen `hit/no_hit`-Flackern
+- Reappearance-Sperre in Kodi (`QF_REAPPEAR_BLOCK_SECONDS`, Default 10 Minuten) gegen das direkte
+  Wiederauftauchen identischer, gerade beendeter Songinfos
 
 ## Start
 ```bash
@@ -77,5 +79,4 @@ Danach kann sie über **"Verifiziert speichern"** in die DB geschrieben werden.
 - `app/live_logger.py`: Thread-sicheres Logging
 - `app/utils.py`: zentrale Helper
 - `app/gui.py`: grafische Oberfläche
-
 
