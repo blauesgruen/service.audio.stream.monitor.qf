@@ -273,21 +273,22 @@ class NowPlayingDiscoveryService:
                 _remember_candidate(extracted_nested_feed)
 
         phase_started = time.perf_counter()
-        generated = self._build_generated_candidates(seed_documents, candidates, resolved, station)
+        document_index = self._build_document_index(seed_documents)
+        generated = self._build_generated_candidates(document_index, candidates, resolved, station)
         phase_timings["generated"] = time.perf_counter() - phase_started
         for generated_url in generated:
             candidates.add(generated_url)
             self._mark_trusted_candidate(generated_url)
 
         phase_started = time.perf_counter()
-        official_player_feeds = self._discover_official_player_feed_urls(seed_documents, resolved, station)
+        official_player_feeds = self._discover_official_player_feed_urls(document_index, resolved, station)
         phase_timings["official_player"] = time.perf_counter() - phase_started
         for feed_url in official_player_feeds:
             candidates.add(feed_url)
             self._mark_trusted_candidate(feed_url)
 
         phase_started = time.perf_counter()
-        playerbar_playlist_feeds = self._discover_playerbar_playlist_urls(seed_documents, resolved, station)
+        playerbar_playlist_feeds = self._discover_playerbar_playlist_urls(document_index, resolved, station)
         phase_timings["playerbar"] = time.perf_counter() - phase_started
         for feed_url in playerbar_playlist_feeds:
             candidates.add(feed_url)
@@ -2297,9 +2298,19 @@ class NowPlayingDiscoveryService:
         except ValueError:
             return None
 
-    def _build_generated_candidates(
+    def _build_document_index(
         self,
         documents: list[tuple[str, str]],
+    ) -> list[tuple[str, str, list[str]]]:
+        indexed_documents = []
+        for doc_url, text in documents:
+            extracted_urls = self._extract_urls_from_document(text, doc_url) if text else []
+            indexed_documents.append((doc_url, text, extracted_urls))
+        return indexed_documents
+
+    def _build_generated_candidates(
+        self,
+        documents: list[tuple[str, str, list[str]]],
         known_candidates: set[str],
         resolved: ResolvedStream,
         station: StationMatch | None,
@@ -2313,8 +2324,8 @@ class NowPlayingDiscoveryService:
             if any(token in lower for token in ("currentsong", "getplaylist", "metadata/channel/", "nowplaying")):
                 api_bases.add(url)
 
-        for doc_url, text in documents:
-            for extracted in self._extract_urls_from_document(text, doc_url):
+        for _, text, extracted_urls in documents:
+            for extracted in extracted_urls:
                 lower = extracted.lower()
                 if any(token in lower for token in ("currentsong", "getplaylist", "metadata/channel/", "nowplaying")):
                     api_bases.add(extracted)
@@ -2347,12 +2358,12 @@ class NowPlayingDiscoveryService:
                 generated.add(cleaned_base)
 
         channel_sources = set(known_candidates)
-        for doc_url, text in documents:
+        for doc_url, text, extracted_urls in documents:
             if doc_url:
                 channel_sources.add(doc_url)
             if not text:
                 continue
-            for extracted in self._extract_urls_from_document(text, doc_url):
+            for extracted in extracted_urls:
                 channel_sources.add(extracted)
         for url in self._extract_channel_current_track_urls(channel_sources):
             if self._looks_like_feed_url(url):
@@ -2401,7 +2412,7 @@ class NowPlayingDiscoveryService:
 
     def _discover_official_player_feed_urls(
         self,
-        documents: list[tuple[str, str]],
+        documents: list[tuple[str, str, list[str]]],
         resolved: ResolvedStream,
         station: StationMatch | None,
     ) -> set[str]:
@@ -2431,17 +2442,15 @@ class NowPlayingDiscoveryService:
 
     def _discover_playerbar_playlist_urls(
         self,
-        documents: list[tuple[str, str]],
+        documents: list[tuple[str, str, list[str]]],
         resolved: ResolvedStream,
         station: StationMatch | None,
     ) -> set[str]:
         container_urls = set()
-        for doc_url, text in documents:
+        for doc_url, _, extracted_urls in documents:
             if self._looks_like_playerbar_container_url(doc_url):
                 container_urls.add(doc_url)
-            if not text:
-                continue
-            for extracted in self._extract_urls_from_document(text, doc_url):
+            for extracted in extracted_urls:
                 if self._looks_like_playerbar_container_url(extracted):
                     container_urls.add(extracted)
 
@@ -2524,10 +2533,10 @@ class NowPlayingDiscoveryService:
             return ""
         return feed_url
 
-    def _extract_official_config_urls(self, documents: list[tuple[str, str]]) -> set[str]:
+    def _extract_official_config_urls(self, documents: list[tuple[str, str, list[str]]]) -> set[str]:
         config_urls = set()
 
-        for doc_url, text in documents:
+        for doc_url, text, extracted_urls in documents:
             if not text:
                 continue
 
@@ -2539,7 +2548,7 @@ class NowPlayingDiscoveryService:
                 continue
 
             script_hosts = set()
-            for extracted in self._extract_urls_from_document(text, doc_url):
+            for extracted in extracted_urls:
                 parsed = urlparse(extracted)
                 if parsed.path.lower().endswith("/build/webradio.js"):
                     scheme = parsed.scheme or "https"
@@ -2795,7 +2804,7 @@ class NowPlayingDiscoveryService:
 
     def _discover_stream_keys(
         self,
-        documents: list[tuple[str, str]],
+        documents: list[tuple[str, str, list[str]]],
         resolved: ResolvedStream,
         station: StationMatch | None,
     ) -> list[str]:
@@ -2804,7 +2813,7 @@ class NowPlayingDiscoveryService:
         weak = []
 
         station_name = (station.name if station else "") or resolved.station_name or ""
-        for _, text in documents:
+        for _, text, _ in documents:
             for key, name in re.findall(
                 r"skey\s*[:=]\s*['\"]([A-Za-z0-9_-]{6,})['\"][^{}]{0,200}?name\s*[:=]\s*['\"]([^'\"]+)['\"]",
                 text,
