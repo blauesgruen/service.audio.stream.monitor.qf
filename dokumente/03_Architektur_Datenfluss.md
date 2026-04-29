@@ -14,6 +14,12 @@
   - ICY-Metadaten lesen (`StreamTitle`, Header).
 - `app/now_playing_discovery.py`
   - Generische Suche nach XML/JSON-Songquellen und Parsing.
+- `app/station_identity.py`
+  - Gemeinsame Stations-Normalisierung, Variantenbildung und `station_key`-Helfer.
+- `app/source_policy.py`
+  - Gemeinsame Origin-Domain-Ermittlung und Source-Policy-Klassifikation.
+- `app/song_probe.py`
+  - Gemeinsamer Probe-/Auswahlkern fuer ICY, Feed-Discovery und finalen Song.
 - `app/epg_service.py`
   - Best-effort EPG/SPI Probe.
 - `app/database.py`
@@ -63,31 +69,27 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 1. Eingabe vom Nutzer
 2. Entscheidung:
    - URL -> direkt `StreamResolver`
-   - Name -> `StationLookupService` -> Stream-Seed
+   - Name -> `find_station_by_name_with_fallback(...)` -> `StationLookupService` -> Stream-Seed
 3. `StreamResolver.resolve()`
    - Redirect verfolgen
    - Playlists erkennen und erste Stream-URL extrahieren
-4. `SongMetadataFetcher.fetch()`
+4. `collect_origin_domains(...)`
+   - Origin-Basisdomains aus Station + aufgeloestem Stream ableiten
+5. `SongProbeSession.probe_once()`
    - ICY lesen
-   - `StreamTitle`, `artist/title` Versuch
-5. `NowPlayingDiscoveryService.discover_candidate_urls()`
-   - Homepage/Seeds/Skripte scannen
-   - zusaetzlich typische Icecast/Shoutcast-Statuspfade pruefen (`status-json.xsl`, `status.xsl`, `stats`)
-   - Kandidaten ranken und begrenzen
-6. `NowPlayingDiscoveryService.fetch_now_playing()`
+   - Feed-Kandidaten entdecken und priorisieren
    - XML/JSON/HTML Kandidaten abrufen (seriell oder parallel in Batches)
-   - bestes `artist/title` ermitteln
-7. Auswahl des finalen Songs
-   - Feed-Song wird bevorzugt, wenn eindeutig und erlaubt
-8. Polling in Intervallen (`SONG_REFRESH_INTERVAL_SECONDS`)
+   - finalen Song zentral anhand Pair-Validierung und Source-Policy bestimmen
+6. Polling in Intervallen (`SONG_REFRESH_INTERVAL_SECONDS`)
    - Songwechsel erkennen
    - Songende erkennen bei fehlendem klaren Song
-9. Optional `SourceDatabase.upsert_verified_source()`
+7. Optional `SourceDatabase.upsert_verified_source()`
 
 ## Kodi-Bridge-Datenfluss (`service.py`)
 
 1. `ASM` schreibt Request-Properties (`RadioMonitor.QF.Request.*`) mit `req_id`.
-2. `ASM-QF` liest Request, verarbeitet Lookup/Resolve/ICY/Discovery.
+2. `ASM-QF` liest Request, verarbeitet Fastpath/Cache und faellt bei Bedarf auf die gemeinsame
+   Vollkette aus `app/` zurueck.
 3. Ergebnis wird als Response (`RadioMonitor.QF.Response.*`) geschrieben.
    - inkl. `RadioMonitor.QF.Response.Meta.station_used` (effektiv verwendeter Sender in QF)
    - ASM uebernimmt diesen Wert und schreibt das Label in seinem eigenen Namespace (nicht als eigenes QF-Response-Feld)
@@ -104,7 +106,9 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - `result_cache_bypassed_pair_changed`: ein alter Cache-Hit wird bewusst verworfen, wenn ein frischer Fastpath ein anderes `artist/title`-Paar liefert.
 - `resolution_cache_hit`: Sender-/Resolve-Daten aus In-Memory-Resolution-Cache innerhalb der Vollkette.
 - Bei Probe-Miss der verifizierten Quelle kann direkt `no_hit` aus dem Fastpath-Zweig geliefert werden (ohne sofortige Vollkette).
-- Vollkette: Lookup -> Resolve -> ICY -> Discovery -> Policy/Parity-Entscheidung, nur wenn Fastpath/Cache keinen verwertbaren Zustand liefern.
+- Vollkette: gemeinsamer Lookup-Fallback -> Resolve -> gemeinsame Origin-Domain-Ermittlung ->
+  gemeinsamer Probe-Kern (`SongProbeSession`) -> Policy/Parity-Entscheidung, nur wenn Fastpath/Cache
+  keinen verwertbaren Zustand liefern.
 - Discovery priorisiert Kandidaten zentral: offizielle HTML-Now-Playing-Kandidaten zuerst, danach starke strukturierte Feed-URLs, dann Rest.
 
 ### Parity-Entscheidung (Kodi-Bridge)
@@ -132,6 +136,7 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 ## Designentscheidungen
 
 - Modular: klare Trennung von Lookup, Resolve, Metadata, Discovery, Storage.
-- Zentral: Konstanten in `config.py`, Modelle in `models.py`.
+- Zentral: Konstanten in `config.py`, Modelle in `models.py`, Shared-Kernlogik in `station_identity.py`,
+  `source_policy.py` und `song_probe.py`.
 - Transparenz: Live-Log plus Rohdaten-Details.
 - Robustheit: mehrere Discovery-Seeds und heuristische Kandidatenbewertung statt Hardcode.

@@ -50,6 +50,8 @@ python3 main.py
 
 ## Single Source Of Truth
 - Kodi und GUI nutzen denselben Top-Level-Code aus diesem Addon-Verzeichnis (`app/`, `service.py`).
+- Gemeinsame Kernlogik liegt zentral in `app/`; GUI und Kodi binden dieselben Shared-Helper fuer
+  Stations-Identitaet, Source-Policy und Song-Probing ein.
 - Es gibt keine zweite Codekopie innerhalb des Repos.
 
 ## Ausfuehrliche Dokumentation
@@ -74,9 +76,11 @@ Danach kann sie über **"Verifiziert speichern"** in die DB geschrieben werden.
 - `app/stream_resolver.py`: URL-/Playlist-Auflösung
 - `app/metadata.py`: Song-Metadaten-Leser
 - `app/now_playing_discovery.py`: generische Feed-Suche + artist/title-Parsing
+- `app/station_identity.py`: gemeinsame Stations-Normalisierung, Variantenbildung und station_key-Helfer
+- `app/source_policy.py`: gemeinsame Origin-Domain- und Source-Policy-Helfer
+- `app/song_probe.py`: gemeinsamer Probe-/Auswahlkern fuer ICY + Feed-Discovery
 - `app/epg_service.py`: EPG-Probe und XML-Zusammenfassung
 - `app/database.py`: SQLite-Logik
 - `app/live_logger.py`: Thread-sicheres Logging
 - `app/utils.py`: zentrale Helper
 - `app/gui.py`: grafische Oberfläche
-

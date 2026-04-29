@@ -22,6 +22,12 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
   - Stream-ICY -> SongInfo
 - `app/now_playing_discovery.py`
   - Web-Discovery + XML/JSON/HTML Parsing -> SongInfo
+- `app/station_identity.py`
+  - gemeinsame Stations-Normalisierung, Lookup-Varianten und `station_key`-Hilfen
+- `app/source_policy.py`
+  - gemeinsame Origin-Domain-Ermittlung und Source-Policy-Klassifikation
+- `app/song_probe.py`
+  - gemeinsamer Probe-/Auswahlkern fuer GUI und Kodi
 - `app/epg_service.py`
   - EPG Probe -> EpgInfo
 - `app/database.py`
@@ -33,19 +39,25 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
 
 ## Laufzeitmodell
 
-Der kritische Pfad liegt in `RadioToolApp._scan_worker()`:
+Der kritische Pfad liegt nicht mehr vollstaendig in einer UI- oder Kodi-spezifischen Methode,
+sondern im gemeinsamen Kern aus `app/`:
 
-1. optional Sender-Lookup
-2. Stream-Aufloesung
-3. Origin-Domain-Ermittlung
-4. Start asynchroner EPG-Thread
-5. Polling-Loop:
+1. `find_station_by_name_with_fallback(...)`
+   - gemeinsamer Sender-Lookup mit generischen Varianten
+2. `StreamResolver.resolve(...)`
+3. `collect_origin_domains(...)`
+4. `SongProbeSession.probe_once()`
    - ICY lesen
-   - Feed-Kandidaten entdecken (einmal)
-   - Feed-Kandidaten priorisieren
+   - Feed-Kandidaten entdecken und priorisieren
    - Feed pollen (seriell oder parallel, konfigurierbar)
-   - Song auswaehlen
-   - Songwechsel/Songende erkennen
+   - finalen Song anhand Pair-Validierung und Source-Policy waehlen
+5. GUI oder Kodi setzen darauf ihre jeweilige Zustands- und Ausgabeschicht
+
+Rollenverteilung:
+
+- `RadioToolApp._scan_worker()` orchestriert GUI-Threading, Polling-Zyklen, Events und EPG.
+- `QFBridgeService._resolve_song()` orchestriert Fastpath, Cache, Parity und Kodi-Response-Logik.
+- Die eigentliche Song-Probe und Quell-Auswahl wird in beiden Pfaden ueber denselben `SongProbeSession`-Kern ausgefuehrt.
 
 Hinweis:
 
@@ -146,6 +158,48 @@ Wichtig:
 - zusaetzliche generische Player-Config-Extraktion (`data-mandate` + `webradio.js` -> `config.json` -> `currentUrl`/`playlistUrl`)
 - zusaetzliche schmale Playerbar-Extraktion: offizielle `playerbarContainer.json`-Dokumente werden nur bei echtem Stream-Match verfolgt und liefern dann ihre `playlist.feedUrl` als Kandidat
 
+### Shared-Kernmodule (`app/`)
+
+#### `station_identity.py`
+
+Oeffentliche Helfer:
+
+- `find_station_by_name_with_fallback(...)`
+- `build_station_key(...)`
+- `build_station_lookup_variants(...)`
+
+Wichtig:
+
+- kapselt die gemeinsame Stations-Normalisierung fuer GUI und Kodi
+- reduziert Drift zwischen GUI-Lookup, Kodi-DB-Lookup und Cache-/Supersede-Logik
+
+#### `source_policy.py`
+
+Oeffentliche Helfer:
+
+- `collect_origin_domains(...)`
+- `classify_song_source(...)`
+- `is_allowed_song_source(...)`
+
+Wichtig:
+
+- kapselt die gemeinsame Origin-/Trusted-Entscheidung
+- GUI und Kodi treffen damit dieselbe Freigabeentscheidung fuer Songquellen
+
+#### `song_probe.py`
+
+Oeffentliche Typen:
+
+- `SongProbeConfig`
+- `SongProbeResult`
+- `SongProbeSession`
+
+Wichtig:
+
+- fuehrt die gemeinsame Probe-Reihenfolge aus: ICY zuerst, Feed-Discovery trotzdem weiter
+- nutzt denselben Auswahlkern fuer Stream-/Feed-Song und Source-Policy
+- GUI und Kodi unterscheiden sich danach nur noch in ihrer zustandsspezifischen Nachbearbeitung
+
 ### `EpgService` (`app/epg_service.py`)
 
 - `fetch(stream_url, homepage_url="") -> EpgInfo`
@@ -178,6 +232,7 @@ Laufzeitrelevante Methoden:
 Wichtig:
 
 - keine direkten UI-Updates aus Worker
+- nutzt die Shared-Helfer fuer Stations-Lookup, Origin-Domains und Song-Probing
 - Songwechsel anhand `song_key = source_url|artist|title`
 - Songende bei wiederholt fehlendem klaren Song
 
@@ -407,4 +462,3 @@ Manueller Funktionstest:
 - `app/config.py`
 - `app/utils.py`
 - `app/live_logger.py`
-
