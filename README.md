@@ -79,6 +79,7 @@ Danach kann sie über **"Verifiziert speichern"** in die DB geschrieben werden.
 - `app/station_identity.py`: gemeinsame Stations-Normalisierung, Variantenbildung und station_key-Helfer
 - `app/source_policy.py`: gemeinsame Origin-Domain- und Source-Policy-Helfer
 - `app/song_probe.py`: gemeinsamer Probe-/Auswahlkern fuer ICY + Feed-Discovery
+- `app/song_parity.py`: gemeinsame Song-Zustandsmaschine fuer Hold, Songende und Reappearance-Sperre
 - `app/epg_service.py`: EPG-Probe und XML-Zusammenfassung
 - `app/database.py`: SQLite-Logik
 - `app/live_logger.py`: Thread-sicheres Logging

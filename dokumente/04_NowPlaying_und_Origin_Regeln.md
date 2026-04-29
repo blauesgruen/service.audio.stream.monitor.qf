@@ -191,7 +191,9 @@ Beim Speichern verifizierter Quellen gilt:
 
 ## QF-Parity gegen Flackern (Kodi)
 
-Die Kodi-Bridge (`ASM-QF`) nutzt zusaetzlich eine Parity-Schicht fuer stabile Entscheidungen:
+Die Kodi-Bridge (`ASM-QF`) nutzt zusaetzlich eine Parity-Schicht fuer stabile Entscheidungen.
+Diese Logik liegt fachlich zentral in `app/song_parity.py` und wird fuer denselben Song-Lifecycle
+auch von der GUI genutzt:
 
 - `QF_HOLD_SECONDS` wird durch `QF_HOLD_SECONDS_MAX` begrenzt (aktuell max. 3.0s).
 - Ein schwacher Feed-only-Hit (`web_feed_*` + fehlendes klares Stream-Signal) wird nicht sofort
@@ -262,5 +264,4 @@ Damit werden reine Webradio-Streams haeufig robuster gefunden, ohne sender-spezi
 - Ohne eindeutige Tokens in Quelle bleibt nur best-effort.
 
 Der Ansatz bleibt trotzdem robust, weil er mehrere Quellen parallel bewertet und nur eindeutige Daten akzeptiert.
-
 

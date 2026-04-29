@@ -21,10 +21,15 @@ if __package__:
         EPG_SEARCH_DEFAULT_ENABLED,
         NOWPLAYING_STRICT_WEBPLAYER_SOURCE,
         ORIGIN_ONLY_MODE,
-        SONG_CLEAR_EMPTY_CYCLES,
-        SONG_END_EMPTY_METADATA_CYCLES,
-        SONG_END_ICY_MISSING_TITLE_GRACE_CYCLES,
         NOWPLAYING_STALE_WITHOUT_STREAM_TRACK_MAX_AGE_MINUTES,
+        QF_EMPTY_CONFIRM,
+        QF_HOLD_SECONDS,
+        QF_HOLD_SECONDS_MAX,
+        QF_NO_HIT_CONFIRM,
+        QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY,
+        QF_REAPPEAR_BLOCK_SECONDS,
+        QF_SERVICE_GUI_PARITY_ENABLED,
+        QF_STALE_FEED_DROP_SECONDS,
         SONG_REFRESH_INTERVAL_SECONDS,
         UI_POLL_INTERVAL_MS,
     )
@@ -34,6 +39,7 @@ if __package__:
     from .metadata import SongMetadataFetcher
     from .models import EpgInfo, ResolvedStream, SongInfo, StationMatch
     from .now_playing_discovery import NowPlayingDiscoveryService
+    from .song_parity import SongParityConfig, SongParityPolicy
     from .song_validation import is_valid_song_candidate, prefilter_pair
     from .song_probe import SongProbeConfig, SongProbeSession
     from .station_identity import find_station_by_name_with_fallback
@@ -54,10 +60,15 @@ else:
         EPG_SEARCH_DEFAULT_ENABLED,
         NOWPLAYING_STRICT_WEBPLAYER_SOURCE,
         ORIGIN_ONLY_MODE,
-        SONG_CLEAR_EMPTY_CYCLES,
-        SONG_END_EMPTY_METADATA_CYCLES,
-        SONG_END_ICY_MISSING_TITLE_GRACE_CYCLES,
         NOWPLAYING_STALE_WITHOUT_STREAM_TRACK_MAX_AGE_MINUTES,
+        QF_EMPTY_CONFIRM,
+        QF_HOLD_SECONDS,
+        QF_HOLD_SECONDS_MAX,
+        QF_NO_HIT_CONFIRM,
+        QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY,
+        QF_REAPPEAR_BLOCK_SECONDS,
+        QF_SERVICE_GUI_PARITY_ENABLED,
+        QF_STALE_FEED_DROP_SECONDS,
         SONG_REFRESH_INTERVAL_SECONDS,
         UI_POLL_INTERVAL_MS,
     )
@@ -67,6 +78,7 @@ else:
     from app.metadata import SongMetadataFetcher
     from app.models import EpgInfo, ResolvedStream, SongInfo, StationMatch
     from app.now_playing_discovery import NowPlayingDiscoveryService
+    from app.song_parity import SongParityConfig, SongParityPolicy
     from app.song_validation import is_valid_song_candidate, prefilter_pair
     from app.song_probe import SongProbeConfig, SongProbeSession
     from app.station_identity import find_station_by_name_with_fallback
@@ -732,14 +744,22 @@ class RadioToolApp:
             last_feed_candidates: list[str] = []
             last_linked_domains: list[str] = []
             reported_no_origin_song = False
-            last_song_key = ""
-            consecutive_no_song_cycles = 0
-            consecutive_empty_metadata_cycles = 0
             restricted_source_mode = ORIGIN_ONLY_MODE or ALLOW_OFFICIAL_CHAIN_SOURCES
             last_stream_error = ""
             last_song_state = "IDLE"
-            consecutive_missing_streamtitle_cycles = 0
-            reported_streamtitle_grace = False
+            displayed_song_key = ""
+            displayed_song: SongInfo | None = None
+            parity_policy = SongParityPolicy(
+                config=SongParityConfig(
+                    enabled=QF_SERVICE_GUI_PARITY_ENABLED,
+                    hold_seconds=min(max(0.0, float(QF_HOLD_SECONDS)), float(QF_HOLD_SECONDS_MAX)),
+                    no_hit_confirm=QF_NO_HIT_CONFIRM,
+                    empty_confirm=QF_EMPTY_CONFIRM,
+                    stale_feed_drop_seconds=float(QF_STALE_FEED_DROP_SECONDS),
+                    reappear_block_seconds=float(QF_REAPPEAR_BLOCK_SECONDS),
+                    pending_feed_confirm_without_history=QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY,
+                )
+            )
 
             def has_metadata_signal(song: SongInfo | None) -> bool:
                 if not song:
@@ -769,13 +789,8 @@ class RadioToolApp:
                 if stream_song:
                     self.logger.log(f"ICY-Slot: {stream_song.stream_title}")
                     last_stream_error = ""
-                    consecutive_missing_streamtitle_cycles = 0
                 elif probe_result.stream_error:
                     current_error = probe_result.stream_error
-                    if stream_title_missing_in_cycle:
-                        consecutive_missing_streamtitle_cycles += 1
-                    else:
-                        consecutive_missing_streamtitle_cycles = 0
                     if current_error != last_stream_error:
                         self.logger.log(f"Songabfrage fehlgeschlagen: {current_error}")
                         self._results.put(("error", f"Songabfrage fehlgeschlagen: {current_error}"))
@@ -796,86 +811,124 @@ class RadioToolApp:
                     last_feed_candidates = list(probe_result.feed_candidates)
                     last_linked_domains = list(probe_result.linked_domains)
 
-                if chosen_song and is_valid_song_candidate(
-                    chosen_song.artist,
-                    chosen_song.title,
-                    station_name=station.name if station else "",
-                ):
-                    song_key = "|".join(
-                        [
-                            chosen_song.source_url or "",
-                            chosen_song.artist.strip().lower(),
-                            chosen_song.title.strip().lower(),
-                        ]
-                    )
-                    if song_key != last_song_key:
-                        approval_label = chosen_song.source_approval or "unclassified"
-                        self.logger.log(f"Song erkannt ({approval_label}): {chosen_song.stream_title}")
-                        self._results.put(("song", chosen_song))
-                        last_song_key = song_key
-                    consecutive_no_song_cycles = 0
-                    consecutive_empty_metadata_cycles = 0
-                    reported_no_origin_song = False
-                    reported_streamtitle_grace = False
-                    publish_song_state("PLAYING")
+                base_meta = {
+                    "feed_pair_state": probe_result.feed_pair_state,
+                    "stream_pair_state": probe_result.stream_pair_state,
+                    "rejected_non_origin_source": probe_result.rejected_non_origin_source,
+                }
+                if chosen_song:
+                    base_meta["source_url"] = chosen_song.source_url or ""
+                    base_meta["source_approval"] = chosen_song.source_approval or ""
+                    parity_input = {
+                        "status": "hit",
+                        "artist": chosen_song.artist,
+                        "title": chosen_song.title,
+                        "source": chosen_song.source_kind,
+                        "reason": "station_name_match",
+                        "meta": base_meta,
+                    }
                 else:
-                    in_streamtitle_grace = (
-                        stream_title_missing_in_cycle
-                        and consecutive_missing_streamtitle_cycles <= SONG_END_ICY_MISSING_TITLE_GRACE_CYCLES
-                    )
-                    if in_streamtitle_grace:
-                        if not reported_streamtitle_grace:
-                            self.logger.log(
-                                "ICY-Titel fehlt temporaer; warte auf stabilen Leerzustand."
-                            )
-                            reported_streamtitle_grace = True
-                        consecutive_no_song_cycles = 0
+                    if probe_result.stream_error:
+                        reason = "no_stream_title" if stream_title_missing_in_cycle else "stream_probe_failed"
+                        base_meta["stream_error"] = probe_result.stream_error
                     else:
-                        reported_streamtitle_grace = False
-                        consecutive_no_song_cycles += 1
+                        reason = "generic_or_non_song"
+                    parity_input = {
+                        "status": "no_hit",
+                        "artist": "",
+                        "title": "",
+                        "source": "",
+                        "reason": reason,
+                        "meta": base_meta,
+                    }
 
+                parity_outcome = parity_policy.apply(parity_input)
+                parity_result = parity_outcome.result
+                parity_meta = parity_result.get("meta") or {}
+                parity_status = str(parity_result.get("status") or "")
+                parity_artist = str(parity_result.get("artist") or "")
+                parity_title = str(parity_result.get("title") or "")
+                parity_source = str(parity_result.get("source") or "")
+                parity_source_url = str(parity_meta.get("source_url") or "")
+
+                if parity_status == "hit" and parity_artist and parity_title:
+                    song_key = SongParityPolicy.build_pair_fingerprint(
+                        parity_artist,
+                        parity_title,
+                        parity_source,
+                        parity_source_url,
+                    )
+                    if chosen_song and (
+                        chosen_song.artist.strip().lower() == parity_artist.strip().lower()
+                        and chosen_song.title.strip().lower() == parity_title.strip().lower()
+                        and chosen_song.source_kind == parity_source
+                    ):
+                        song_for_ui = chosen_song
+                    elif displayed_song and song_key == displayed_song_key:
+                        song_for_ui = displayed_song
+                    else:
+                        song_for_ui = SongInfo(
+                            stream_title=f"{parity_artist} - {parity_title}",
+                            raw_metadata="",
+                            artist=parity_artist,
+                            title=parity_title,
+                            source_kind=parity_source or "stream_icy",
+                            source_url=parity_source_url,
+                            source_approval=str(parity_meta.get("source_approval") or ""),
+                            source_headers=displayed_song.source_headers if displayed_song and song_key == displayed_song_key else {},
+                        )
+                    if song_key != displayed_song_key:
+                        approval_label = song_for_ui.source_approval or "unclassified"
+                        self.logger.log(f"Song erkannt ({approval_label}): {song_for_ui.stream_title}")
+                        self._results.put(("song", song_for_ui))
+                        displayed_song_key = song_key
+                    displayed_song = song_for_ui
+                    reported_no_origin_song = False
+                    if parity_outcome.action == "hold_last_song":
+                        publish_song_state("MAYBE_ENDED")
+                    else:
+                        publish_song_state("PLAYING")
+                else:
                     poll_has_metadata = has_metadata_signal(stream_song) or has_metadata_signal(feed_song)
-                    if poll_has_metadata or in_streamtitle_grace:
+                    if parity_outcome.action == "confirm_no_hit" and displayed_song_key:
+                        if parity_meta.get("stale_feed_only"):
+                            self.logger.log(
+                                "Songende erkannt: schwacher Feed-Treffer wurde als stale verworfen"
+                            )
+                        elif parity_meta.get("reappeared_recently_cleared_pair"):
+                            self.logger.log(
+                                "Wiederauftauchender Alt-Song verworfen: Reappearance-Sperre aktiv"
+                            )
+                        elif parity_outcome.debug.get("empty_confirmed"):
+                            self.logger.log(
+                                "Songende erkannt: wiederholt leere Metadaten (vermutlich kein Song aktiv)"
+                            )
+                        else:
+                            self.logger.log(
+                                "Songende erkannt: aktuell kein eindeutiger Song (Jingle/Beitrag/Nachrichten)"
+                            )
+                        displayed_song_key = ""
+                        displayed_song = None
+                        self._results.put(("song_cleared", None))
+
+                    if poll_has_metadata or parity_outcome.action in {"pending_hit", "soft_no_hit", "hold_last_song"}:
                         publish_song_state("MAYBE_ENDED")
                     else:
                         publish_song_state("NO_METADATA")
-                    if poll_has_metadata or in_streamtitle_grace:
-                        consecutive_empty_metadata_cycles = 0
-                    else:
-                        consecutive_empty_metadata_cycles += 1
 
-                    if last_song_key:
-                        end_due_empty = consecutive_empty_metadata_cycles >= SONG_END_EMPTY_METADATA_CYCLES
-                        end_due_inconclusive = consecutive_no_song_cycles >= SONG_CLEAR_EMPTY_CYCLES
-                        if end_due_empty or end_due_inconclusive:
-                            if end_due_empty:
-                                self.logger.log(
-                                    "Songende erkannt: wiederholt leere Metadaten (vermutlich kein Song aktiv)"
-                                )
+                    if restricted_source_mode and parity_status != "hit":
+                        self.logger.log("Keine Quelle mit eindeutigem Artist in diesem Poll-Zyklus")
+                        if not reported_no_origin_song:
+                            if ORIGIN_ONLY_MODE and ALLOW_OFFICIAL_CHAIN_SOURCES:
+                                message = "Keine aktuelle Origin-/Player-Ketten-Quelle mit eindeutigem Artist gefunden"
+                            elif ORIGIN_ONLY_MODE:
+                                message = "Keine aktuelle Origin-Quelle mit eindeutigem Artist gefunden"
                             else:
-                                self.logger.log(
-                                    "Songende erkannt: aktuell kein eindeutiger Song (Jingle/Beitrag/Nachrichten)"
-                                )
-                            last_song_key = ""
-                            self._results.put(("song_cleared", None))
-                            consecutive_no_song_cycles = 0
-                            consecutive_empty_metadata_cycles = 0
-
-                    if restricted_source_mode:
-                        suppress_no_artist_warning = in_streamtitle_grace and bool(last_song_key)
-                        if not suppress_no_artist_warning:
-                            self.logger.log("Keine Quelle mit eindeutigem Artist in diesem Poll-Zyklus")
-                            if not reported_no_origin_song:
-                                if ORIGIN_ONLY_MODE and ALLOW_OFFICIAL_CHAIN_SOURCES:
-                                    message = "Keine aktuelle Origin-/Player-Ketten-Quelle mit eindeutigem Artist gefunden"
-                                elif ORIGIN_ONLY_MODE:
-                                    message = "Keine aktuelle Origin-Quelle mit eindeutigem Artist gefunden"
-                                else:
-                                    message = "Keine aktuelle Quelle mit eindeutigem Artist gefunden"
-                                if probe_result.rejected_non_origin_source:
-                                    message += " (nicht erlaubte Quelle verworfen)"
-                                self._results.put(("error", message))
-                                reported_no_origin_song = True
+                                message = "Keine aktuelle Quelle mit eindeutigem Artist gefunden"
+                            if probe_result.rejected_non_origin_source:
+                                message += " (nicht erlaubte Quelle verworfen)"
+                            self._results.put(("error", message))
+                            reported_no_origin_song = True
 
                 for _ in range(SONG_REFRESH_INTERVAL_SECONDS):
                     if self._stop_event.is_set():

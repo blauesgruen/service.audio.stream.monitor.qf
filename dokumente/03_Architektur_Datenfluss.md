@@ -20,6 +20,8 @@
   - Gemeinsame Origin-Domain-Ermittlung und Source-Policy-Klassifikation.
 - `app/song_probe.py`
   - Gemeinsamer Probe-/Auswahlkern fuer ICY, Feed-Discovery und finalen Song.
+- `app/song_parity.py`
+  - Gemeinsame Song-Zustandsmaschine fuer Hold, Songende, Stale-Guard und Reappearance-Sperre.
 - `app/epg_service.py`
   - Best-effort EPG/SPI Probe.
 - `app/database.py`
@@ -80,10 +82,14 @@ Die UI aktualisiert damit gezielt einzelne Felder.
    - Feed-Kandidaten entdecken und priorisieren
    - XML/JSON/HTML Kandidaten abrufen (seriell oder parallel in Batches)
    - finalen Song zentral anhand Pair-Validierung und Source-Policy bestimmen
-6. Polling in Intervallen (`SONG_REFRESH_INTERVAL_SECONDS`)
+6. `SongParityPolicy.apply(...)`
+   - bestaetigt Hits
+   - erkennt Songende
+   - blockt identische Wiedererscheinung nach Songende
+7. Polling in Intervallen (`SONG_REFRESH_INTERVAL_SECONDS`)
    - Songwechsel erkennen
    - Songende erkennen bei fehlendem klaren Song
-7. Optional `SourceDatabase.upsert_verified_source()`
+8. Optional `SourceDatabase.upsert_verified_source()`
 
 ## Kodi-Bridge-Datenfluss (`service.py`)
 
@@ -107,13 +113,14 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - `resolution_cache_hit`: Sender-/Resolve-Daten aus In-Memory-Resolution-Cache innerhalb der Vollkette.
 - Bei Probe-Miss der verifizierten Quelle kann direkt `no_hit` aus dem Fastpath-Zweig geliefert werden (ohne sofortige Vollkette).
 - Vollkette: gemeinsamer Lookup-Fallback -> Resolve -> gemeinsame Origin-Domain-Ermittlung ->
-  gemeinsamer Probe-Kern (`SongProbeSession`) -> Policy/Parity-Entscheidung, nur wenn Fastpath/Cache
-  keinen verwertbaren Zustand liefern.
+  gemeinsamer Probe-Kern (`SongProbeSession`) -> gemeinsame Song-Parity (`SongParityPolicy`) ->
+  Policy/Parity-Entscheidung, nur wenn Fastpath/Cache keinen verwertbaren Zustand liefern.
 - Discovery priorisiert Kandidaten zentral: offizielle HTML-Now-Playing-Kandidaten zuerst, danach starke strukturierte Feed-URLs, dann Rest.
 
 ### Parity-Entscheidung (Kodi-Bridge)
 
-- Die finale Entscheidung fuer `hit`/`no_hit` laeuft zentral in `QFBridgeService._apply_qf_parity_policy`.
+- Die finale Entscheidung fuer `hit`/`no_hit` laeuft fachlich zentral in `app/song_parity.py`;
+  `QFBridgeService._apply_qf_parity_policy` ergaenzt nur noch Request-Gap-Telemetrie und Trace-Logging.
 - `QF_HOLD_SECONDS` wird zur Laufzeit durch `QF_HOLD_SECONDS_MAX` hart gedeckelt (aktuell 3.0s).
 - Feed-only-Hits mit schwachem Stream-Signal werden nicht mehr nach wenigen Sekunden verworfen,
   sondern erst nach `QF_STALE_FEED_DROP_SECONDS` (konservatives Drop-Fenster).
@@ -137,6 +144,6 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 
 - Modular: klare Trennung von Lookup, Resolve, Metadata, Discovery, Storage.
 - Zentral: Konstanten in `config.py`, Modelle in `models.py`, Shared-Kernlogik in `station_identity.py`,
-  `source_policy.py` und `song_probe.py`.
+  `source_policy.py`, `song_probe.py` und `song_parity.py`.
 - Transparenz: Live-Log plus Rohdaten-Details.
 - Robustheit: mehrere Discovery-Seeds und heuristische Kandidatenbewertung statt Hardcode.

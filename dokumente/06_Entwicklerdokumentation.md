@@ -28,6 +28,8 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
   - gemeinsame Origin-Domain-Ermittlung und Source-Policy-Klassifikation
 - `app/song_probe.py`
   - gemeinsamer Probe-/Auswahlkern fuer GUI und Kodi
+- `app/song_parity.py`
+  - gemeinsame Song-Zustandsmaschine fuer GUI und Kodi
 - `app/epg_service.py`
   - EPG Probe -> EpgInfo
 - `app/database.py`
@@ -51,13 +53,18 @@ sondern im gemeinsamen Kern aus `app/`:
    - Feed-Kandidaten entdecken und priorisieren
    - Feed pollen (seriell oder parallel, konfigurierbar)
    - finalen Song anhand Pair-Validierung und Source-Policy waehlen
-5. GUI oder Kodi setzen darauf ihre jeweilige Zustands- und Ausgabeschicht
+5. `SongParityPolicy.apply(...)`
+   - bestaetigt Hits
+   - haelt kurze `no_hit`-Phasen kontrolliert aus
+   - erkennt Songende und blockt direkte Wiedererscheinung
+6. GUI oder Kodi setzen darauf ihre jeweilige Zustands- und Ausgabeschicht
 
 Rollenverteilung:
 
 - `RadioToolApp._scan_worker()` orchestriert GUI-Threading, Polling-Zyklen, Events und EPG.
 - `QFBridgeService._resolve_song()` orchestriert Fastpath, Cache, Parity und Kodi-Response-Logik.
 - Die eigentliche Song-Probe und Quell-Auswahl wird in beiden Pfaden ueber denselben `SongProbeSession`-Kern ausgefuehrt.
+- Die eigentliche Song-Zustandsentscheidung nach dem Probe-Lauf wird in beiden Pfaden ueber dieselbe `SongParityPolicy` ausgefuehrt.
 
 Hinweis:
 
@@ -200,6 +207,20 @@ Wichtig:
 - nutzt denselben Auswahlkern fuer Stream-/Feed-Song und Source-Policy
 - GUI und Kodi unterscheiden sich danach nur noch in ihrer zustandsspezifischen Nachbearbeitung
 
+#### `song_parity.py`
+
+Oeffentliche Typen:
+
+- `SongParityConfig`
+- `SongParityOutcome`
+- `SongParityPolicy`
+
+Wichtig:
+
+- kapselt Hold, bestaetigtes Songende, Feed-Stale-Guard und Reappearance-Sperre
+- arbeitet auf einem gemeinsamen Zustandsobjekt und reduziert Drift zwischen GUI und Kodi-Anzeige
+- `service.py` nutzt darueber nur noch Telemetrie/Trace-Logik, nicht mehr die fachliche Parity-Logik selbst
+
 ### `EpgService` (`app/epg_service.py`)
 
 - `fetch(stream_url, homepage_url="") -> EpgInfo`
@@ -233,8 +254,9 @@ Wichtig:
 
 - keine direkten UI-Updates aus Worker
 - nutzt die Shared-Helfer fuer Stations-Lookup, Origin-Domains und Song-Probing
+- nutzt dieselbe `SongParityPolicy` wie Kodi fuer Songwechsel- und Songende-Entscheidungen
 - Songwechsel anhand `song_key = source_url|artist|title`
-- Songende bei wiederholt fehlendem klaren Song
+- Songende ueber die gemeinsame Parity-Zustandsmaschine statt ueber lokale Zaehlerlogik
 
 ## Invarianten
 

@@ -238,6 +238,7 @@ class QFBridgeService(xbmc.Monitor):
             )
             from app.metadata import SongMetadataFetcher
             from app.now_playing_discovery import NowPlayingDiscoveryService
+            from app.song_parity import SongParityConfig, SongParityPolicy
             from app.song_validation import prefilter_pair
             from app.song_probe import SongProbeConfig, SongProbeSession
             from app.station_identity import (
@@ -320,6 +321,8 @@ class QFBridgeService(xbmc.Monitor):
         )
         self.SongMetadataFetcher = SongMetadataFetcher
         self.NowPlayingDiscoveryService = NowPlayingDiscoveryService
+        self.SongParityConfig = SongParityConfig
+        self.SongParityPolicy = SongParityPolicy
         self.prefilter_pair = prefilter_pair
         self.SongProbeConfig = SongProbeConfig
         self.SongProbeSession = SongProbeSession
@@ -1264,62 +1267,6 @@ class QFBridgeService(xbmc.Monitor):
             **extra,
         )
 
-    def _build_pair_fingerprint(self, artist="", title="", source="", source_url=""):
-        artist_value = str(artist or "").strip().lower()
-        title_value = str(title or "").strip().lower()
-        source_value = str(source or "").strip().lower()
-        source_url_value = str(source_url or "").strip().lower()
-        if not artist_value or not title_value:
-            return ""
-        return "|".join((artist_value, title_value, source_value, source_url_value))
-
-    def _build_result_pair_fingerprint(self, result):
-        result_obj = result if isinstance(result, dict) else {}
-        meta = result_obj.get("meta") or {}
-        return self._build_pair_fingerprint(
-            artist=result_obj.get("artist") or "",
-            title=result_obj.get("title") or "",
-            source=result_obj.get("source") or "",
-            source_url=meta.get("source_url") or "",
-        )
-
-    def _remember_recently_cleared_pair(self, state, now_ts):
-        pair_fingerprint = str(state.get("last_pair_fingerprint") or "").strip()
-        if not pair_fingerprint:
-            pair_fingerprint = self._build_pair_fingerprint(
-                artist=state.get("last_artist") or "",
-                title=state.get("last_title") or "",
-                source=state.get("last_source") or "",
-                source_url=(state.get("last_meta") or {}).get("source_url") or "",
-            )
-        if not pair_fingerprint:
-            return
-        state["recently_cleared_pair_fingerprint"] = pair_fingerprint
-        state["recently_cleared_pair_ts"] = float(now_ts or 0.0)
-
-    def _clear_recently_cleared_pair(self, state):
-        state["recently_cleared_pair_fingerprint"] = ""
-        state["recently_cleared_pair_ts"] = 0.0
-
-    def _get_recently_cleared_reappearance_block(self, state, result, now_ts):
-        block_seconds = float(self.QF_REAPPEAR_BLOCK_SECONDS or 0.0)
-        if block_seconds <= 0.0:
-            return False, 0.0
-        pair_fingerprint = self._build_result_pair_fingerprint(result)
-        if not pair_fingerprint:
-            return False, 0.0
-        cleared_fingerprint = str(state.get("recently_cleared_pair_fingerprint") or "").strip()
-        cleared_ts = float(state.get("recently_cleared_pair_ts") or 0.0)
-        if not cleared_fingerprint or cleared_ts <= 0.0:
-            return False, 0.0
-        age = max(0.0, float(now_ts or 0.0) - cleared_ts)
-        if age > block_seconds:
-            self._clear_recently_cleared_pair(state)
-            return False, 0.0
-        if pair_fingerprint != cleared_fingerprint:
-            return False, 0.0
-        return True, max(0.0, block_seconds - age)
-
     def _apply_qf_parity_policy(self, station_key, result, request_ts=0.0):
         state = self._get_station_state(station_key)
         now = time.time()
@@ -1353,318 +1300,33 @@ class QFBridgeService(xbmc.Monitor):
                 request_gap_smoothed = (alpha * request_gap_raw) + ((1.0 - alpha) * request_gap_smoothed)
             state["request_gap_ema"] = request_gap_smoothed
 
-        state["updated_ts"] = now
-        status = str(result.get("status") or "")
-        reason = str(result.get("reason") or "")
-        artist = str(result.get("artist") or "")
-        title = str(result.get("title") or "")
-        source = str(result.get("source") or "")
-        meta = result.get("meta") or {}
         effective_hold_seconds = float(self.QF_HOLD_SECONDS)
-        stale_feed_drop_seconds = float(self.QF_STALE_FEED_DROP_SECONDS)
-
-        def _clear_pending_hit():
-            state["pending_hit_key"] = ""
-            state["pending_hit_count"] = 0
-            state["pending_hit_ts"] = 0.0
-
-        def _clear_last_hit_state():
-            state["last_artist"] = ""
-            state["last_title"] = ""
-            state["last_source"] = ""
-            state["last_reason"] = ""
-            state["last_meta"] = {}
-            state["last_pair_fingerprint"] = ""
-            state["last_pair_first_seen_ts"] = 0.0
-            state["last_hit_ts"] = 0.0
-            state["last_strong_hit_ts"] = 0.0
-
-        pending_bypassed = False
-        if status == "hit" and artist and title:
-            blocked_reappearance, block_remaining = self._get_recently_cleared_reappearance_block(
-                state,
-                result,
-                now,
-            )
-            if blocked_reappearance:
-                status = "no_hit"
-                reason = "reappeared_recently_cleared_pair"
-                artist = ""
-                title = ""
-                source = ""
-                meta = {
-                    **meta,
-                    "reappeared_recently_cleared_pair": True,
-                    "reappear_block_seconds": round(float(self.QF_REAPPEAR_BLOCK_SECONDS), 3),
-                    "reappear_block_remaining": round(block_remaining, 3),
-                }
-                result = {
-                    "status": status,
-                    "artist": artist,
-                    "title": title,
-                    "source": source,
-                    "reason": reason,
-                    "meta": meta,
-                }
-
-        if status == "hit" and artist and title:
-            has_last_pair_before = bool(state.get("last_artist") and state.get("last_title"))
-            stream_pair_state = str(meta.get("stream_pair_state") or "")
-            is_feed_hit = str(source).startswith("web_feed_")
-            weak_stream_signal = stream_pair_state in {"", "no_candidate", "missing_field"}
-            need_pending_confirmation = bool(self.QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY)
-            if (
-                self.QF_SERVICE_GUI_PARITY_ENABLED
-                and is_feed_hit
-                and weak_stream_signal
-                and not has_last_pair_before
-                and need_pending_confirmation
-            ):
-                pending_key = f"{artist.lower()}|{title.lower()}|{source}"
-                previous_key = str(state.get("pending_hit_key") or "")
-                previous_count = int(state.get("pending_hit_count") or 0)
-                if pending_key == previous_key and previous_count > 0:
-                    state["pending_hit_count"] = previous_count + 1
-                else:
-                    state["pending_hit_key"] = pending_key
-                    state["pending_hit_count"] = 1
-                state["pending_hit_ts"] = now
-
-                if int(state.get("pending_hit_count") or 0) < 2:
-                    pending_result = {
-                        "status": "no_hit",
-                        "artist": "",
-                        "title": "",
-                        "source": "",
-                        "reason": "pending_feed_confirmation",
-                        "meta": {
-                            **meta,
-                            "pending_hit": True,
-                            "pending_hit_count": state.get("pending_hit_count") or 0,
-                            "pending_pair": f"{artist} - {title}",
-                        },
-                    }
-                    self._trace_qf_decision(
-                        station_key,
-                        "pending_hit",
-                        pending_result,
-                        state,
-                        last_hit_age="",
-                        hold_remaining=0.0,
-                        request_gap=round(request_gap_raw, 3),
-                        request_gap_smoothed=round(request_gap_smoothed, 3),
-                        gap_source=gap_source,
-                        effective_hold_seconds=effective_hold_seconds,
-                    )
-                    self._prune_station_state()
-                    return pending_result
-
-                _clear_pending_hit()
-            else:
-                pending_bypassed = bool(
-                    self.QF_SERVICE_GUI_PARITY_ENABLED
-                    and is_feed_hit
-                    and weak_stream_signal
-                    and not has_last_pair_before
-                    and not need_pending_confirmation
-                )
-                if pending_bypassed:
-                    meta = {**meta, "pending_bypassed": True}
-                    result = {
-                        "status": status,
-                        "artist": artist,
-                        "title": title,
-                        "source": source,
-                        "reason": reason,
-                        "meta": meta,
-                    }
-                _clear_pending_hit()
-
-            # GUI-parity guard: if we only keep seeing the same feed pair without stream support,
-            # do not let that stale feed keep the song alive forever.
-            if status == "hit" and is_feed_hit and weak_stream_signal and has_last_pair_before:
-                same_pair = (
-                    artist.strip().lower() == str(state.get("last_artist") or "").strip().lower()
-                    and title.strip().lower() == str(state.get("last_title") or "").strip().lower()
-                )
-                reference_ts = float(state.get("last_strong_hit_ts") or 0.0)
-                if reference_ts <= 0.0:
-                    reference_ts = float(state.get("last_pair_first_seen_ts") or 0.0)
-                weak_age = (now - reference_ts) if reference_ts > 0.0 else 0.0
-                if same_pair and reference_ts > 0.0 and weak_age > stale_feed_drop_seconds:
-                    status = "no_hit"
-                    reason = "generic_or_non_song"
-                    artist = ""
-                    title = ""
-                    source = ""
-                    meta = {
-                        **meta,
-                        "stale_feed_only": True,
-                        "stale_feed_age": round(weak_age, 3),
-                        "stale_feed_drop_seconds": round(stale_feed_drop_seconds, 3),
-                    }
-                    result = {
-                        "status": status,
-                        "artist": artist,
-                        "title": title,
-                        "source": source,
-                        "reason": reason,
-                        "meta": meta,
-                    }
-
-        if status == "hit" and artist and title:
-            stream_pair_state = str(meta.get("stream_pair_state") or "")
-            is_feed_hit = str(source).startswith("web_feed_")
-            weak_stream_signal = stream_pair_state in {"", "no_candidate", "missing_field"}
-            pair_fingerprint = self._build_result_pair_fingerprint(result)
-            if pair_fingerprint and pair_fingerprint != str(state.get("last_pair_fingerprint") or ""):
-                state["last_pair_fingerprint"] = pair_fingerprint
-                state["last_pair_first_seen_ts"] = now
-            elif pair_fingerprint and float(state.get("last_pair_first_seen_ts") or 0.0) <= 0.0:
-                state["last_pair_first_seen_ts"] = now
-
-            state["last_hit_ts"] = now
-            if not (is_feed_hit and weak_stream_signal):
-                state["last_strong_hit_ts"] = now
-            state["last_artist"] = artist
-            state["last_title"] = title
-            state["last_source"] = source
-            state["last_reason"] = reason
-            state["last_no_hit_reason"] = ""
-            state["last_meta"] = dict(meta)
-            state["no_hit_streak"] = 0
-            state["empty_streak"] = 0
-            if pair_fingerprint and pair_fingerprint != str(state.get("recently_cleared_pair_fingerprint") or ""):
-                self._clear_recently_cleared_pair(state)
-            self._trace_qf_decision(
-                station_key,
-                "accept_hit",
-                result,
-                state,
-                last_hit_age=0.0,
-                hold_remaining=round(effective_hold_seconds, 3),
-                request_gap=round(request_gap_raw, 3),
-                request_gap_smoothed=round(request_gap_smoothed, 3),
-                gap_source=gap_source,
-                effective_hold_seconds=effective_hold_seconds,
-                pending_bypassed=pending_bypassed,
-            )
-            self._prune_station_state()
-            return result
-
-        if status != "no_hit" or not self.QF_SERVICE_GUI_PARITY_ENABLED:
-            if status == "no_hit":
-                state["last_no_hit_reason"] = reason
-                state["no_hit_streak"] = int(state.get("no_hit_streak") or 0) + 1
-            self._trace_qf_decision(
-                station_key,
-                "passthrough",
-                result,
-                state,
-                request_gap=round(request_gap_raw, 3),
-                request_gap_smoothed=round(request_gap_smoothed, 3),
-                gap_source=gap_source,
-                effective_hold_seconds=effective_hold_seconds,
-            )
-            self._prune_station_state()
-            return result
-
-        state["last_no_hit_reason"] = reason
-        state["no_hit_streak"] = int(state.get("no_hit_streak") or 0) + 1
-
-        feed_pair_state = str(meta.get("feed_pair_state") or "")
-        stream_pair_state = str(meta.get("stream_pair_state") or "")
-        empty_signals = {"missing_field", "no_candidate"}
-        is_empty_signal = reason == "generic_or_non_song" and (
-            feed_pair_state in empty_signals or stream_pair_state in empty_signals
+        parity_policy = self.SongParityPolicy(
+            state=state,
+            config=self.SongParityConfig(
+                enabled=self.QF_SERVICE_GUI_PARITY_ENABLED,
+                hold_seconds=effective_hold_seconds,
+                no_hit_confirm=self.QF_NO_HIT_CONFIRM,
+                empty_confirm=self.QF_EMPTY_CONFIRM,
+                stale_feed_drop_seconds=self.QF_STALE_FEED_DROP_SECONDS,
+                reappear_block_seconds=self.QF_REAPPEAR_BLOCK_SECONDS,
+                pending_feed_confirm_without_history=self.QF_PENDING_FEED_CONFIRM_WITHOUT_HISTORY,
+            ),
         )
-        if is_empty_signal:
-            state["empty_streak"] = int(state.get("empty_streak") or 0) + 1
-        else:
-            state["empty_streak"] = 0
-
-        last_hit_ts = float(state.get("last_hit_ts") or 0.0)
-        has_last_pair = bool(state.get("last_artist") and state.get("last_title"))
-        last_hit_age = (now - last_hit_ts) if last_hit_ts > 0 else float("inf")
-        hold_remaining = max(0.0, effective_hold_seconds - last_hit_age) if has_last_pair else 0.0
-        hold_active = has_last_pair and hold_remaining > 0
-
-        no_hit_confirmed = int(state.get("no_hit_streak") or 0) >= int(self.QF_NO_HIT_CONFIRM)
-        empty_confirmed = int(state.get("empty_streak") or 0) >= int(self.QF_EMPTY_CONFIRM)
-
-        # Song-Ende priorisieren: bestätigte no-hit/empty-Signale dürfen Hold sofort beenden.
-        if no_hit_confirmed or empty_confirmed:
-            self._remember_recently_cleared_pair(state, now)
-            _clear_last_hit_state()
-            state["no_hit_streak"] = 0
-            state["empty_streak"] = 0
-            _clear_pending_hit()
-            self._trace_qf_decision(
-                station_key,
-                "confirm_no_hit",
-                result,
-                state,
-                last_hit_age=round(last_hit_age, 3) if last_hit_age != float("inf") else "",
-                hold_remaining=round(hold_remaining, 3),
-                request_gap=round(request_gap_raw, 3),
-                request_gap_smoothed=round(request_gap_smoothed, 3),
-                gap_source=gap_source,
-                effective_hold_seconds=effective_hold_seconds,
-                no_hit_confirmed=no_hit_confirmed,
-                empty_confirmed=empty_confirmed,
-            )
-            self._prune_station_state()
-            return result
-
-        if hold_active:
-            hold_result = {
-                "status": "hit",
-                "artist": state.get("last_artist") or "",
-                "title": state.get("last_title") or "",
-                "source": state.get("last_source") or "asm-qf_hold",
-                "reason": "hold_last_song",
-                "meta": {
-                    **(state.get("last_meta") or {}),
-                    "hold": True,
-                    "hold_remaining": round(hold_remaining, 3),
-                    "hold_seconds": round(effective_hold_seconds, 3),
-                    "no_hit_reason": reason,
-                    "no_hit_streak": state.get("no_hit_streak") or 0,
-                    "empty_streak": state.get("empty_streak") or 0,
-                    "feed_pair_state": feed_pair_state,
-                    "stream_pair_state": stream_pair_state,
-                },
-            }
-            self._trace_qf_decision(
-                station_key,
-                "hold_last_song",
-                hold_result,
-                state,
-                last_hit_age=round(last_hit_age, 3),
-                hold_remaining=round(hold_remaining, 3),
-                request_gap=round(request_gap_raw, 3),
-                request_gap_smoothed=round(request_gap_smoothed, 3),
-                gap_source=gap_source,
-                effective_hold_seconds=effective_hold_seconds,
-            )
-            self._prune_station_state()
-            return hold_result
-
-
+        parity_outcome = parity_policy.apply(result, now_ts=now)
         self._trace_qf_decision(
             station_key,
-            "soft_no_hit",
-            result,
+            parity_outcome.action,
+            parity_outcome.result,
             state,
-            last_hit_age=round(last_hit_age, 3) if last_hit_age != float("inf") else "",
-            hold_remaining=0.0,
             request_gap=round(request_gap_raw, 3),
             request_gap_smoothed=round(request_gap_smoothed, 3),
             gap_source=gap_source,
             effective_hold_seconds=effective_hold_seconds,
+            **parity_outcome.debug,
         )
         self._prune_station_state()
-        return result
+        return parity_outcome.result
 
     def _resolve_song(self, station_input, station_id="", station_key="", supersede_check=None, skip_verified_fastpath=False):
         lookup, resolver, fetcher, discovery = self._get_core_services()
