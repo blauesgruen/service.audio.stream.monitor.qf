@@ -10,7 +10,7 @@ Das Tool analysiert Internetradio-Streams mit Fokus auf drei Fragen:
 
 ## Kernfunktionen
 
-- Sendername -> Stream-URL per Radio-Browser API
+- Sendername oder optionale Station-ID/Slug -> Stream-URL
 - Stream-Aufloesung mit Redirect- und Playlist-Verfolgung (`m3u`, `pls`, `xspf`)
 - Trennung von:
   - `Origin URL` (vom Sender verwaltete Quelle)
@@ -24,6 +24,7 @@ Das Tool analysiert Internetradio-Streams mit Fokus auf drei Fragen:
 - Rohdaten-Detailansicht mit kompletter Nachvollziehbarkeit
 - Speicherung verifizierter Quellen in SQLite
 - Web-Fallback fuer Sendernamen mit mehreren Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`)
+- ID-First-Lookup fuer Radio-Browser-UUIDs oder stabile Slugs; bei ID-Treffern kann derselbe Web-Fallback auch direkt auf der ID greifen
 - Kodi-Bridge (`ASM-QF`) mit Request/Response-Handshake, typgerechtem Verified-Source-Fastpath (Stream vs Feed) und nachrangigem Ergebnis-Cache
 - Bei abweichendem frischem Fastpath-Paar wird ein alter Result-Cache-Hit bewusst uebergangen
 - Die Vollkette (Lookup/Resolve/ICY/Discovery) laeuft nur, wenn Fastpath und Result-Cache keinen Treffer liefern

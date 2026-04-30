@@ -5,9 +5,9 @@
 - `main.py`
   - Einstiegspunkt, startet `run_app()`.
 - `app/gui.py`
-  - Tkinter-Oberflaeche, Worker-Thread, Event-Queue, Live-Status.
+  - Tkinter-Oberflaeche, optionaler `Station-ID`-/Slug-Hint, Worker-Thread, Event-Queue, Live-Status.
 - `app/station_lookup.py`
-  - Sendername -> bestes Radio-Browser-Match.
+  - Sendername oder Station-ID -> bestes Match inkl. Web-Fallback.
 - `app/stream_resolver.py`
   - URL-Aufloesung inkl. Redirects und Playlist-Parsing.
 - `app/metadata.py`
@@ -15,7 +15,7 @@
 - `app/now_playing_discovery.py`
   - Generische Suche nach XML/JSON/JSONP/HTML-Songquellen und Parsing inkl. offizieller GraphQL-Track-Feeds.
 - `app/station_identity.py`
-  - Gemeinsame Stations-Normalisierung, Variantenbildung und `station_key`-Helfer.
+  - Gemeinsame Stations-Normalisierung, ID-First-Lookup, Variantenbildung und `station_key`-Helfer.
 - `app/source_policy.py`
   - Gemeinsame Origin-Domain-Ermittlung und Source-Policy-Klassifikation.
 - `app/song_probe.py`
@@ -71,7 +71,8 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 1. Eingabe vom Nutzer
 2. Entscheidung:
    - URL -> direkt `StreamResolver`
-   - Name -> `find_station_by_name_with_fallback(...)` -> `StationLookupService` -> Stream-Seed
+   - Name mit optionaler `Station-ID` -> `find_station_with_optional_id(...)` -> `StationLookupService` -> Stream-Seed
+   - Name ohne `Station-ID` -> `find_station_by_name_with_fallback(...)` -> `StationLookupService` -> Stream-Seed
 3. `StreamResolver.resolve()`
    - Redirect verfolgen
    - Playlists erkennen und erste Stream-URL extrahieren
@@ -95,6 +96,7 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 ## Kodi-Bridge-Datenfluss (`service.py`)
 
 1. `ASM` schreibt Request-Properties (`RadioMonitor.QF.Request.*`) mit `req_id`.
+   - optional inkl. `RadioMonitor.QF.Request.StationId` als stabile Radio-Browser-UUID oder Slug-Hinweis
 2. `ASM-QF` liest Request, verarbeitet Fastpath/Cache und faellt bei Bedarf auf die gemeinsame
    Vollkette aus `app/` zurueck.
 3. Ergebnis wird als Response (`RadioMonitor.QF.Response.*`) geschrieben.
@@ -116,6 +118,7 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - Vollkette: gemeinsamer Lookup-Fallback -> Resolve -> gemeinsame Origin-Domain-Ermittlung ->
   gemeinsamer Probe-Kern (`SongProbeSession`) -> gemeinsame Song-Parity (`SongParityPolicy`) ->
   Policy/Parity-Entscheidung, nur wenn Fastpath/Cache keinen verwertbaren Zustand liefern.
+- Bei gesetzter `StationId` versucht der gemeinsame Lookup-Pfad zuerst `find_by_id(...)`; bei Miss folgt der normale Namenspfad.
 - Discovery priorisiert Kandidaten zentral: offizielle HTML-Now-Playing-Kandidaten zuerst, danach starke strukturierte Feed-URLs, dann Rest.
 
 ### Parity-Entscheidung (Kodi-Bridge)

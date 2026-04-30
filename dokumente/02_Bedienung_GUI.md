@@ -2,7 +2,10 @@
 
 ## Hauptfenster
 
-Eingabefeld: `Sendername oder URL`
+Eingabefelder:
+
+- `Sendername oder URL`
+- optional `Station-ID / Slug`
 
 Buttons:
 
@@ -25,12 +28,13 @@ Statusfelder:
 ## Typischer Ablauf
 
 1. Sendername eingeben, z. B. `mdr jump`.
-2. `Pruefen + Starten` klicken.
-3. Tool sucht Sender-Match (Radio-Browser) und loest Stream auf.
-4. Tool liest ICY-Metadaten und startet parallel EPG-Probe.
-5. Tool sucht automatisch moegliche Web-Feeds fuer klare Songdaten (`artist/title`), auch wenn ICY keinen Songtitel liefert.
-6. Bei Treffer wird Songanzeige aktualisiert.
-7. Bei passendem Zustand `Verifiziert speichern` ausfuehren.
+2. Optional einen stabilen `Station-ID`-/Slug-Hinweis eintragen, wenn der freie Name mehrdeutig oder ungenau ist.
+3. `Pruefen + Starten` klicken.
+4. Tool versucht bei gesetzter `Station-ID` zuerst den gemeinsamen ID-Pfad; sonst den normalen Namens-Lookup.
+5. Tool liest ICY-Metadaten und startet parallel EPG-Probe.
+6. Tool sucht automatisch moegliche Web-Feeds fuer klare Songdaten (`artist/title`), auch wenn ICY keinen Songtitel liefert.
+7. Bei Treffer wird Songanzeige aktualisiert.
+8. Bei passendem Zustand `Verifiziert speichern` ausfuehren.
 
 ## Was in der Songzeile angezeigt wird
 
@@ -72,7 +76,7 @@ Parity-Hinweise (Kodi-Bridge):
 
 ## Quell-Details-Fenster: Sektionen
 
-- `Eingabe/Status`
+- `Eingabe/Status` inkl. aktuell gesetztem `Station-ID`-/Slug-Hinweis
 - `Sender-Lookup (Rohdaten)` inkl. Radio-Browser-JSON
 - `Aufgeloeste Stream-Quelle` (Origin/Delivery)
 - `Entdeckte Song-Feed-Quellen`

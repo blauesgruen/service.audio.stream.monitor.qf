@@ -121,6 +121,7 @@ Wichtige QF-Schalter:
 - Bei ueberholten Requests schreibt `ASM-QF` explizit `status=aborted` (kein stiller Abbruchpfad).
 - Standardbetrieb: Supersede ist als Preflight aktiv (vor Start der Bearbeitung), Midflight-Supersede ist standardmaessig deaktiviert, um Abbruch-Kaskaden zu vermeiden.
 - Request-Ablauf in ASM-QF: erst `verified_source_fastpath`, dann optional `result_cache`; die Vollkette laeuft nur bei Doppel-Miss oder wenn explizit noetig.
+- `RadioMonitor.QF.Request.StationId` kann als stabile Radio-Browser-UUID oder als Slug-Hinweis gesetzt werden; der Lookup versucht diesen ID-Pfad vor dem freien Namen.
 - Wenn ein frischer Fastpath-Hit ein anderes `artist/title` liefert als der Cache, wird der Cache bewusst uebergangen (`result_cache_bypassed_pair_changed`).
 - Bei Fastpath-Probe-Miss (Feed/ICY liefert aktuell kein gueltiges Paar) wird der Cache ebenfalls uebergangen (`result_cache_bypassed_verified_probe_state`) und optional direkt `no_hit` geliefert.
 - Der effektive Hold ist auf `QF_HOLD_SECONDS_MAX` gedeckelt (auch wenn `QF_HOLD_SECONDS` hoeher gesetzt wird).
@@ -177,6 +178,10 @@ Das Tool prueft nur wenige standardisierte SPI/EPG-Pfade (best-effort), mit Prob
 ### 6) Sendername wird nicht gefunden
 
 Wenn Radio-Browser leer ist, nutzt das Tool einen Web-Fallback (z. B. `radio.de`/`radio.net`) mit mehreren Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`).
+
+Wenn ein stabiler Slug oder eine bekannte Station-ID vorliegt, sollte dieser Wert bevorzugt als `StationId` mitgegeben werden
+(GUI-Hinweisfeld oder `RadioMonitor.QF.Request.StationId` in Kodi). Dann versucht der Lookup zuerst den ID-Pfad
+und kann den Web-Fallback auch direkt auf diesem Wert anwenden.
 
 ## Wartung und Erweiterung
 

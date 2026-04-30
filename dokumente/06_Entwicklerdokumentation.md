@@ -15,7 +15,7 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
 - `app/config.py`
   - zentrale Runtime-Konstanten
 - `app/station_lookup.py`
-  - Name -> StationMatch
+  - Name/Station-ID -> StationMatch
 - `app/stream_resolver.py`
   - URL/Playlist -> ResolvedStream
 - `app/metadata.py`
@@ -44,8 +44,8 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
 Der kritische Pfad liegt nicht mehr vollstaendig in einer UI- oder Kodi-spezifischen Methode,
 sondern im gemeinsamen Kern aus `app/`:
 
-1. `find_station_by_name_with_fallback(...)`
-   - gemeinsamer Sender-Lookup mit generischen Varianten
+1. `find_station_with_optional_id(...)`
+   - gemeinsamer ID-First-Lookup; faellt bei Bedarf auf den Namens-Lookup mit generischen Varianten zurueck
 2. `StreamResolver.resolve(...)`
 3. `collect_origin_domains(...)`
 4. `SongProbeSession.probe_once()`
@@ -111,6 +111,7 @@ Radio-Browser Match inkl. `raw_record` fuer Rohdatenanzeige.
 ### `StationLookupService` (`app/station_lookup.py`)
 
 - `find_best_match(query: str) -> StationMatch`
+- `find_by_id(stationuuid: str) -> StationMatch`
 
 Wichtig:
 
@@ -118,6 +119,7 @@ Wichtig:
 - erzeugt Lookup- und Slug-Varianten aus generischen Token-Fenstern (keine sender-festen Regeln)
 - dedupliziert und scored Kandidaten
 - Web-Fallback prueft mehrere Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`)
+- `find_by_id(...)` akzeptiert echte UUIDs und stabile Slugs; bei Miss kann derselbe Web-Fallback direkt auf der ID greifen
 
 ### `StreamResolver` (`app/stream_resolver.py`)
 
@@ -175,13 +177,14 @@ Wichtig:
 
 Oeffentliche Helfer:
 
+- `find_station_with_optional_id(...)`
 - `find_station_by_name_with_fallback(...)`
 - `build_station_key(...)`
 - `build_station_lookup_variants(...)`
 
 Wichtig:
 
-- kapselt die gemeinsame Stations-Normalisierung fuer GUI und Kodi
+- kapselt die gemeinsame Stations-Normalisierung und den gemeinsamen ID-First-Lookup fuer GUI und Kodi
 - reduziert Drift zwischen GUI-Lookup, Kodi-DB-Lookup und Cache-/Supersede-Logik
 
 #### `source_policy.py`
@@ -255,7 +258,7 @@ Wichtig:
 Laufzeitrelevante Methoden:
 
 - `start_scan()`
-- `_scan_worker(value)`
+- `_scan_worker(value, station_id, epg_enabled)`
 - `_consume_results()`
 - `_render_source_details()`
 - `save_verified()`
@@ -342,6 +345,7 @@ Request-Felder (`ASM` -> `ASM-QF`):
 - `RadioMonitor.QF.Request.Id`
 - `RadioMonitor.QF.Request.Station`
 - `RadioMonitor.QF.Request.StationId`
+  - optional; bevorzugt stabile Radio-Browser-UUID oder Slug-Hinweis
 - `RadioMonitor.QF.Request.Mode`
 - `RadioMonitor.QF.Request.Ts`
 
