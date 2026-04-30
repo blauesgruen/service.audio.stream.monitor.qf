@@ -41,11 +41,13 @@ Aus Seeds werden Inhalte geholt und nach URLs durchsucht:
 - XML/JSON-Pfade
 - Script-Assets (`.js`) auf gleicher Basisdomain
 - verschachtelte Script-Bundles auf derselben Basisdomain, wenn dort Feed- oder weitere Script-URLs dynamisch zusammengesetzt werden
+- Redirect-Ziele und `canonical`/`base href` werden als zusaetzliche Join-Basis genutzt, damit offizielle Nachfolge-Seiten nicht an alten Seed-Hosts haengen bleiben
 
 Zusatzlogik:
 
 - `avcustom`-Dokumente werden extra verfolgt
 - offizielle `playerbarContainer.json`-Dokumente koennen zusaetzlich bis zur referenzierten `playlist.feedUrl` verfolgt werden, wenn ihr eingebetteter Audiostream zum aufgeloesten Sender passt
+- offizielle Frontends koennen zusaetzlich generische GraphQL-Track-Endpunkte liefern; diese werden nur als `trusted`-Kandidaten aus offizieller Player-Kette uebernommen
 - Audio-/Video-Content wird als Discovery-Text verworfen
 - redaktionelle HTML-Seiten mit Podcast-/Artikel-Charakter ohne echte Now-Playing-Struktur werden nicht mehr als direkte HTML-Feed-Kandidaten bevorzugt
 
@@ -124,6 +126,8 @@ Weiterhin ausgeschlossen:
 - extrahiert analoge Feldnamen (`title/song/track`, `artist/author/interpret`, etc.)
 - Statusfelder analog zu XML
 - bevorzugt bei Listen-Feeds aktive Eintraege ueber Zeitfenster (`starttime + duration`) und Zustandsfelder wie `playingMode` statt blind den ersten Listeneintrag zu nehmen
+- JSONP-Wrapper wie `callback(...)` werden vor dem JSON-Parse generisch entpackt
+- offizielle GraphQL-Track-Feeds werden nach demselben Prinzip in normale Song-Kandidaten ueberfuehrt; auch dort entscheidet die zentrale Zeitfensterlogik ueber `now`, `expired` oder `future`
 
 ### HTML
 
@@ -142,6 +146,15 @@ Es gibt zwei Ebenen:
    - aktive Eintraege werden bei JSON-Listen deutlich bevorzugt
 
 Damit werden veraltete "now"-Eintraege schneller ausgesiebt, ohne sender-spezifischen Code.
+
+## Text-Normalisierung
+
+Vor der finalen Anzeige werden Artist-/Title-Texte zentral normalisiert:
+
+- HTML-Unescaping und Whitespace-Bereinigung
+- Best-Effort-Korrektur haeufiger Mojibake-Faelle aus falsch dekodierten UTF-8-Texten
+
+Die Korrektur sitzt absichtlich im gemeinsamen Textpfad und nicht in einzelnen Sender-Parsern.
 
 ## Auswahl des finalen Songs
 

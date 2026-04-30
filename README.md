@@ -14,6 +14,8 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Zentrale Feed-Priorisierung: offizielle HTML-Now-Playing-Kandidaten zuerst, danach starke strukturierte Feeds (`XML`/`JSON`), dann Rest
 - Discovery kann offizielle Now-Playing-Feeds auch aus verschachtelten Script-Bundles derselben Domain ableiten (z. B. dynamisch zusammengesetzte `...playerbarPlaylist...json`-URLs)
 - Discovery kann bei offiziellen `playerbarContainer.json`-Dokumenten die darin referenzierte `playlist.feedUrl` verfolgen, sofern der eingebettete Stream eindeutig zum aufgeloesten Sender passt
+- Discovery kann JSONP-Feeds generisch entpacken und als normale JSON-Now-Playing-Quelle auswerten
+- Discovery kann offizielle GraphQL-Track-Feeds aus einer verlinkten Player-Kette generisch ableiten und ueber denselben Zeitfenster-/Policy-Kern bewerten
 - Feed-Probing kann parallel in Batches laufen (`NOWPLAYING_PARALLEL_*` in `app/config.py`)
 - Discovery-Crawl fuer Seed-Seiten und Script-Assets kann begrenzt parallel laufen (`DISCOVERY_*` in `app/config.py`)
 - Generische Icecast/Shoutcast-Statusquellen werden mitberuecksichtigt (`status-json.xsl`, `status.xsl`, `stats`)
@@ -25,7 +27,9 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Trennung von `Origin-Stream` und `Delivery-URL` (Redirect-Ziel)
 - Web-Fallback bei Sendernamen prueft mehrere Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`)
 - JSON-Feeds mit `starttime`/`duration` und Zustandsfeldern wie `playingMode` bevorzugen den aktuell aktiven Eintrag gegenueber vergangenen oder zukuenftigen Listeneintraegen
+- Dieselbe zentrale Zeitfensterlogik wird auch fuer offizielle Track-Listen-Feeds (inkl. GraphQL) genutzt
 - Feed-Daten werden auf Frische geprüft; veraltete `now`-Einträge werden verworfen
+- Metadaten-Texte werden zentral normalisiert, damit haeufige Mojibake-Faelle aus falsch dekodierten UTF-8-Texten nicht als kaputte Anzeige in GUI/Kodi landen
 - Redaktionelle HTML-Seiten (z. B. Podcast-/Artikel-Slugs ohne echte Now-Playing-Struktur) werden fuer direkte Feed-Probes generisch abgewertet bzw. aussortiert
 - Songanzeige nur bei eindeutigem `artist` + `title`
 - Best-Effort EPG-Probe (falls Sender EPG/SI.xml online bereitstellt)

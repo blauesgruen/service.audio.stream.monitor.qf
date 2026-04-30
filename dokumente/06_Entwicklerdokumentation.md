@@ -19,9 +19,9 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
 - `app/stream_resolver.py`
   - URL/Playlist -> ResolvedStream
 - `app/metadata.py`
-  - Stream-ICY -> SongInfo
+  - Stream-ICY -> SongInfo, inkl. zentraler Metadaten-Normalisierung
 - `app/now_playing_discovery.py`
-  - Web-Discovery + XML/JSON/HTML Parsing -> SongInfo
+  - Web-Discovery + XML/JSON/JSONP/HTML/GraphQL Parsing -> SongInfo
 - `app/station_identity.py`
   - gemeinsame Stations-Normalisierung, Lookup-Varianten und `station_key`-Hilfen
 - `app/source_policy.py`
@@ -37,7 +37,7 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
 - `app/live_logger.py`
   - thread-sicheres Logging
 - `app/utils.py`
-  - kleine, moduluebergreifende Utilities
+  - kleine, moduluebergreifende Utilities inkl. Text-Normalisierung/Mojibake-Reparatur
 
 ## Laufzeitmodell
 
@@ -138,6 +138,7 @@ Wichtig:
 - setzt Header `Icy-MetaData: 1`
 - erwartet `icy-metaint`
 - erkennt `artist/title` aus mehreren Stringmustern
+- normalisiert Metadaten-Texte zentral, bevor Pair-Validierung und Anzeige greifen
 
 ### `NowPlayingDiscoveryService` (`app/now_playing_discovery.py`)
 
@@ -154,16 +155,19 @@ Wichtig:
 - keine sender-spezifischen hardcodes
 - Candidate Ranking + Filter + Key-Injection
 - verfolgt bei Bedarf priorisierte Script-Bundles derselben Domain bis zu dynamisch zusammengesetzten Feed-URLs
+- beruecksichtigt Redirect-/Canonical-Basen beim URL-Extrahieren aus Discovery-Dokumenten
 - zentrale Kandidaten-Priorisierung (offizielle HTML-Kandidaten zuerst, danach starke strukturierte Feeds)
 - `fetch_now_playing` nutzt je nach Konfiguration serielle oder parallele Batch-Probes (`NOWPLAYING_PARALLEL_*`)
 - zusaetzliche generische Status-Seed-Endpunkte (`status-json.xsl`, `status.xsl`, `stats`)
 - Frischelogik ueber `MAX_NOWPLAYING_AGE_MINUTES`
 - zusaetzlich Dauerfenster pruefung ueber `starttime + duration + NOWPLAYING_DURATION_GRACE_SECONDS`
 - JSON-Kandidaten werden nicht nur nach `artist/title`, sondern auch nach aktivem Zeitfenster und Zustandsfeldern wie `playingMode` gescored
+- JSONP-Payloads werden zentral entpackt; offizielle GraphQL-Track-Feeds werden ueber denselben Parse-/Zeitfenster-Kern bewertet
 - HTTP-Transport mit Best-Effort-Fallback (`https` -> unverified SSL bei Cert-Fehler -> optional `http`)
 - `trusted` markiert Discovery-Quellen aus offizieller Player-Kette; nur mit `ALLOW_OFFICIAL_CHAIN_SOURCES=True` zusaetzlich erlaubt
 - zusaetzliche generische Player-Config-Extraktion (`data-mandate` + `webradio.js` -> `config.json` -> `currentUrl`/`playlistUrl`)
 - zusaetzliche schmale Playerbar-Extraktion: offizielle `playerbarContainer.json`-Dokumente werden nur bei echtem Stream-Match verfolgt und liefern dann ihre `playlist.feedUrl` als Kandidat
+- offizielle Frontends koennen zusaetzlich generische GraphQL-Track-Kandidaten liefern; die Auswahl des aktiven Tracks bleibt dabei in den zentralen Zeitfenster-Helfern
 
 ### Shared-Kernmodule (`app/`)
 

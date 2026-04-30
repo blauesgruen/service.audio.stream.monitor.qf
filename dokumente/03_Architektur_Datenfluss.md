@@ -11,9 +11,9 @@
 - `app/stream_resolver.py`
   - URL-Aufloesung inkl. Redirects und Playlist-Parsing.
 - `app/metadata.py`
-  - ICY-Metadaten lesen (`StreamTitle`, Header).
+  - ICY-Metadaten lesen (`StreamTitle`, Header) und Metadaten-Texte zentral normalisieren.
 - `app/now_playing_discovery.py`
-  - Generische Suche nach XML/JSON-Songquellen und Parsing.
+  - Generische Suche nach XML/JSON/JSONP/HTML-Songquellen und Parsing inkl. offizieller GraphQL-Track-Feeds.
 - `app/station_identity.py`
   - Gemeinsame Stations-Normalisierung, Variantenbildung und `station_key`-Helfer.
 - `app/source_policy.py`
@@ -33,7 +33,7 @@
 - `app/config.py`
   - Zentrale Konstanten.
 - `app/utils.py`
-  - Hilfsfunktionen (`base_domain`, URL-Checks, `origin`-Checks).
+  - Hilfsfunktionen (`base_domain`, URL-Checks, `origin`-Checks, Text-Normalisierung).
 
 ## Threading-Modell
 
@@ -80,6 +80,7 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 5. `SongProbeSession.probe_once()`
    - ICY lesen
    - Feed-Kandidaten entdecken und priorisieren
+   - Redirect-/Canonical-nahe Discovery-Dokumente und offizielle Player-Ketten nach weiteren Feed-Kandidaten scannen
    - XML/JSON/HTML Kandidaten abrufen (seriell oder parallel in Batches)
    - finalen Song zentral anhand Pair-Validierung und Source-Policy bestimmen
 6. `SongParityPolicy.apply(...)`
@@ -145,5 +146,6 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - Modular: klare Trennung von Lookup, Resolve, Metadata, Discovery, Storage.
 - Zentral: Konstanten in `config.py`, Modelle in `models.py`, Shared-Kernlogik in `station_identity.py`,
   `source_policy.py`, `song_probe.py` und `song_parity.py`.
+- Wiederverwendung: Zeitfenster-, Frische- und Text-Normalisierung sollen moeglichst zentral bleiben und nicht in einzelnen Feed-Pfaden dupliziert werden.
 - Transparenz: Live-Log plus Rohdaten-Details.
 - Robustheit: mehrere Discovery-Seeds und heuristische Kandidatenbewertung statt Hardcode.
