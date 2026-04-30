@@ -99,6 +99,45 @@ def find_station_by_name_with_fallback(
     raise last_error if last_error else ValueError("Kein passender Sender gefunden.")
 
 
+def find_station_with_optional_id(
+    lookup_service,
+    station_input: str,
+    *,
+    station_id: str = "",
+    allow_name_fallback: bool = True,
+    on_station_id_failed: Callable[[str, Exception], None] | None = None,
+    on_station_id_selected: Callable[[str, object], None] | None = None,
+    on_variant_failed: Callable[[str, Exception], None] | None = None,
+    on_variant_selected: Callable[[str, object], None] | None = None,
+):
+    station_id_norm = normalize_station_id(station_id)
+    last_error = None
+
+    if station_id_norm:
+        try:
+            station = lookup_service.find_by_id(station_id_norm)
+            if on_station_id_selected:
+                on_station_id_selected(station_id_norm, station)
+            return station
+        except Exception as err:
+            last_error = err
+            if on_station_id_failed:
+                on_station_id_failed(station_id_norm, err)
+            if not allow_name_fallback:
+                raise
+
+    if station_input:
+        return find_station_by_name_with_fallback(
+            lookup_service,
+            station_input,
+            station_id=station_id_norm,
+            on_variant_failed=on_variant_failed,
+            on_variant_selected=on_variant_selected,
+        )
+
+    raise last_error if last_error else ValueError("Kein passender Sender gefunden.")
+
+
 def build_station_key(station_name: str, station_id: str = "") -> str:
     station_id_norm = normalize_station_id(station_id)
     if station_id_norm:

@@ -284,6 +284,17 @@ class StationLookupService:
                 )
                 return best
 
+        fallback_station = self._fallback_web_directory_station(uuid_clean)
+        if fallback_station:
+            self._apply_query_alias_name(fallback_station, uuid_clean)
+            self._log(
+                "Sender-Match (ID-Web-Fallback): "
+                f"{fallback_station.name} | {fallback_station.country or '-'} | "
+                f"{fallback_station.codec or '-'} {fallback_station.bitrate}kbps | "
+                f"votes={fallback_station.votes}"
+            )
+            return fallback_station
+
         if errors:
             raise StationLookupError("Sender-Abfrage fehlgeschlagen: " + " | ".join(errors))
         raise StationLookupError(f"Keinen passenden Sender gefunden für ID '{uuid_clean}'.")

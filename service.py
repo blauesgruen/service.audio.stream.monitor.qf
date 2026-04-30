@@ -246,6 +246,7 @@ class QFBridgeService(xbmc.Monitor):
                 build_station_lookup_variants,
                 compact_station_text,
                 find_station_by_name_with_fallback,
+                find_station_with_optional_id,
                 normalize_station_id,
                 normalize_station_name,
                 sanitize_station_text,
@@ -332,6 +333,7 @@ class QFBridgeService(xbmc.Monitor):
         self.compact_station_text = compact_station_text
         self.collect_origin_domains = collect_origin_domains
         self.find_station_by_name_with_fallback = find_station_by_name_with_fallback
+        self.find_station_with_optional_id = find_station_with_optional_id
         self.normalize_station_id = normalize_station_id
         self.normalize_station_name = normalize_station_name
         self.sanitize_station_text = sanitize_station_text
@@ -497,6 +499,38 @@ class QFBridgeService(xbmc.Monitor):
                 input=station_input,
                 variant=variant,
                 station_id=station_id_norm,
+                name=station.name,
+            ),
+        )
+
+    def _find_station_with_optional_id(self, lookup, station_input, station_id="", allow_name_fallback=True):
+        return self.find_station_with_optional_id(
+            lookup,
+            station_input,
+            station_id=station_id,
+            allow_name_fallback=allow_name_fallback,
+            on_station_id_failed=lambda station_id_norm, err: self.logger.warning(
+                "station_id_lookup_failed",
+                id=station_id_norm,
+                error=str(err),
+            ),
+            on_station_id_selected=lambda station_id_norm, station: self.logger.debug(
+                "station_id_match_ok",
+                id=station_id_norm,
+                name=station.name,
+            ),
+            on_variant_failed=lambda variant, err: self.logger.debug(
+                "station_name_lookup_variant_failed",
+                input=station_input,
+                variant=variant,
+                station_id=station_id,
+                error=str(err),
+            ),
+            on_variant_selected=lambda variant, station: self.logger.info(
+                "station_name_lookup_fallback_ok",
+                input=station_input,
+                variant=variant,
+                station_id=station_id,
                 name=station.name,
             ),
         )
@@ -1414,18 +1448,15 @@ class QFBridgeService(xbmc.Monitor):
         else:
             if station_id_norm:
                 try:
-                    station = lookup.find_by_id(station_id_norm)
+                    station = self._find_station_with_optional_id(
+                        lookup,
+                        station_input,
+                        station_id=station_id_norm,
+                        allow_name_fallback=not self.is_probable_url(station_input) and bool(station_input),
+                    )
                     stream_seed = station.stream_url
-                    self.logger.debug("station_id_match_ok", id=station_id_norm, name=station.name)
                 except Exception as err:
-                    self.logger.warning("station_id_lookup_failed", id=station_id_norm, error=str(err))
-                    if not self.is_probable_url(station_input) and station_input:
-                        station = self._find_station_by_name_with_fallback(
-                            lookup,
-                            station_input,
-                            station_id_norm=station_id_norm,
-                        )
-                        stream_seed = station.stream_url
+                    self.logger.warning("station_lookup_failed", station=station_input, station_id=station_id_norm, error=str(err))
             elif not self.is_probable_url(station_input) and station_input:
                 station = self._find_station_by_name_with_fallback(lookup, station_input)
                 stream_seed = station.stream_url

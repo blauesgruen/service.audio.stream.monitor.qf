@@ -42,7 +42,7 @@ if __package__:
     from .song_parity import SongParityConfig, SongParityPolicy
     from .song_validation import is_valid_song_candidate, prefilter_pair
     from .song_probe import SongProbeConfig, SongProbeSession
-    from .station_identity import find_station_by_name_with_fallback
+    from .station_identity import find_station_by_name_with_fallback, find_station_with_optional_id
     from .source_policy import collect_origin_domains
     from .station_lookup import StationLookupError, StationLookupService
     from .stream_resolver import StreamResolveError, StreamResolver
@@ -81,7 +81,7 @@ else:
     from app.song_parity import SongParityConfig, SongParityPolicy
     from app.song_validation import is_valid_song_candidate, prefilter_pair
     from app.song_probe import SongProbeConfig, SongProbeSession
-    from app.station_identity import find_station_by_name_with_fallback
+    from app.station_identity import find_station_by_name_with_fallback, find_station_with_optional_id
     from app.source_policy import collect_origin_domains
     from app.station_lookup import StationLookupError, StationLookupService
     from app.stream_resolver import StreamResolveError, StreamResolver
@@ -109,6 +109,7 @@ class RadioToolApp:
         self._origin_domains: list[str] = []
 
         self.url_var = tk.StringVar()
+        self.station_id_var = tk.StringVar()
         self.station_var = tk.StringVar(value="-")
         self.resolved_var = tk.StringVar(value="-")
         self.delivery_var = tk.StringVar(value="-")
@@ -144,58 +145,63 @@ class RadioToolApp:
         url_entry.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(4, 8))
         url_entry.focus_set()
 
+        ttk.Label(frame, text="Station-ID / Slug (optional):").grid(row=2, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.station_id_var, width=60).grid(
+            row=3, column=0, columnspan=3, sticky="ew", pady=(4, 8)
+        )
+
         self.start_button = ttk.Button(frame, text="Prüfen + Starten", command=self.start_scan)
-        self.start_button.grid(row=2, column=0, sticky="w")
+        self.start_button.grid(row=4, column=0, sticky="w")
 
         self.stop_button = ttk.Button(frame, text="Stop", command=self.stop_scan, state="disabled")
-        self.stop_button.grid(row=2, column=1, sticky="w", padx=(8, 0))
+        self.stop_button.grid(row=4, column=1, sticky="w", padx=(8, 0))
 
         self.batch_button = ttk.Button(frame, text="Batchtest Datei...", command=self.start_batch_scan)
-        self.batch_button.grid(row=2, column=2, sticky="w", padx=(8, 0))
+        self.batch_button.grid(row=4, column=2, sticky="w", padx=(8, 0))
 
         ttk.Button(frame, text="Live-Log öffnen", command=self.show_log_window).grid(
-            row=2, column=3, sticky="w", padx=(8, 0)
+            row=4, column=3, sticky="w", padx=(8, 0)
         )
 
         ttk.Button(frame, text="Quell-Details", command=self.show_details_window).grid(
-            row=2, column=4, sticky="w", padx=(8, 0)
+            row=4, column=4, sticky="w", padx=(8, 0)
         )
 
         self.save_button = ttk.Button(frame, text="Verifiziert speichern", command=self.save_verified, state="disabled")
-        self.save_button.grid(row=2, column=5, sticky="e")
+        self.save_button.grid(row=4, column=5, sticky="e")
 
-        ttk.Separator(frame, orient="horizontal").grid(row=3, column=0, columnspan=6, sticky="ew", pady=10)
+        ttk.Separator(frame, orient="horizontal").grid(row=5, column=0, columnspan=6, sticky="ew", pady=10)
 
-        ttk.Label(frame, text="Gefundener Sender:").grid(row=4, column=0, sticky="w")
-        ttk.Label(frame, textvariable=self.station_var).grid(row=5, column=0, columnspan=6, sticky="w")
+        ttk.Label(frame, text="Gefundener Sender:").grid(row=6, column=0, sticky="w")
+        ttk.Label(frame, textvariable=self.station_var).grid(row=7, column=0, columnspan=6, sticky="w")
 
-        ttk.Label(frame, text="Original-Stream:").grid(row=6, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.resolved_var, foreground="#0b5").grid(row=7, column=0, columnspan=6, sticky="w")
+        ttk.Label(frame, text="Original-Stream:").grid(row=8, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.resolved_var, foreground="#0b5").grid(row=9, column=0, columnspan=6, sticky="w")
 
-        ttk.Label(frame, text="Delivery-URL (Redirect-Ziel):").grid(row=8, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.delivery_var).grid(row=9, column=0, columnspan=6, sticky="w")
+        ttk.Label(frame, text="Delivery-URL (Redirect-Ziel):").grid(row=10, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.delivery_var).grid(row=11, column=0, columnspan=6, sticky="w")
 
-        ttk.Label(frame, text="Content-Type:").grid(row=10, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.content_type_var).grid(row=11, column=0, sticky="w")
+        ttk.Label(frame, text="Content-Type:").grid(row=12, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.content_type_var).grid(row=13, column=0, sticky="w")
 
-        ttk.Label(frame, text="Aktueller Song:").grid(row=12, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, text="Aktueller Song:").grid(row=14, column=0, sticky="w", pady=(10, 0))
         ttk.Label(frame, textvariable=self.song_var, font=("TkDefaultFont", 11, "bold")).grid(
-            row=13, column=0, columnspan=6, sticky="w"
+            row=15, column=0, columnspan=6, sticky="w"
         )
 
-        ttk.Label(frame, text="Song-Quelle URL:").grid(row=14, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.song_source_var).grid(row=15, column=0, columnspan=6, sticky="w")
+        ttk.Label(frame, text="Song-Quelle URL:").grid(row=16, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.song_source_var).grid(row=17, column=0, columnspan=6, sticky="w")
 
-        ttk.Label(frame, text="Song-Status:").grid(row=16, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.song_state_var).grid(row=17, column=0, columnspan=6, sticky="w")
+        ttk.Label(frame, text="Song-Status:").grid(row=18, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.song_state_var).grid(row=19, column=0, columnspan=6, sticky="w")
 
-        ttk.Label(frame, text="EPG-Status:").grid(row=18, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.epg_var).grid(row=19, column=0, columnspan=6, sticky="w")
+        ttk.Label(frame, text="EPG-Status:").grid(row=20, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.epg_var).grid(row=21, column=0, columnspan=6, sticky="w")
 
-        ttk.Label(frame, textvariable=self.origin_mode_var).grid(row=20, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.origin_mode_var).grid(row=22, column=0, columnspan=6, sticky="w", pady=(10, 0))
 
-        ttk.Separator(frame, orient="horizontal").grid(row=21, column=0, columnspan=6, sticky="ew", pady=10)
-        ttk.Label(frame, textvariable=self.status_var).grid(row=22, column=0, columnspan=6, sticky="w")
+        ttk.Separator(frame, orient="horizontal").grid(row=23, column=0, columnspan=6, sticky="ew", pady=10)
+        ttk.Label(frame, textvariable=self.status_var).grid(row=24, column=0, columnspan=6, sticky="w")
 
         frame.columnconfigure(0, weight=1)
 
@@ -315,6 +321,7 @@ class RadioToolApp:
 
     def start_scan(self) -> None:
         value = self.url_var.get().strip()
+        station_id = self.station_id_var.get().strip()
         if not value:
             messagebox.showwarning("Fehlende Eingabe", "Bitte Sendername oder URL eingeben.")
             return
@@ -337,7 +344,7 @@ class RadioToolApp:
 
         self._worker = threading.Thread(
             target=self._scan_worker,
-            args=(value, bool(self.epg_enabled_var.get())),
+            args=(value, station_id, bool(self.epg_enabled_var.get())),
             daemon=True,
         )
         self._worker.start()
@@ -654,7 +661,7 @@ class RadioToolApp:
         self.logger.log("Verifizierte Quelle in DB gespeichert")
         messagebox.showinfo("Gespeichert", "Quelle wurde in der DB gespeichert/aktualisiert.")
 
-    def _scan_worker(self, value: str, epg_enabled: bool) -> None:
+    def _scan_worker(self, value: str, station_id: str, epg_enabled: bool) -> None:
         resolver = StreamResolver(self.logger.log)
         fetcher = SongMetadataFetcher(self.logger.log)
         lookup = StationLookupService(self.logger.log)
@@ -668,7 +675,13 @@ class RadioToolApp:
 
             if not is_probable_url(value):
                 self.logger.log(f"Eingabe als Sendername erkannt: {value}")
-                station = find_station_by_name_with_fallback(lookup, value)
+                if station_id:
+                    self.logger.log(f"Station-ID/Slug Hint: {station_id}")
+                station = find_station_with_optional_id(
+                    lookup,
+                    value,
+                    station_id=station_id,
+                )
                 stream_seed = station.stream_url
                 self._results.put(("station", station))
                 self.logger.log(f"Sendername auf Stream-URL aufgelöst: {stream_seed}")
@@ -949,6 +962,7 @@ class RadioToolApp:
 
         sections.append("### Eingabe/Status")
         sections.append(f"Sendername/URL Eingabe: {self.url_var.get().strip() or '-'}")
+        sections.append(f"Station-ID/Slug Hint: {self.station_id_var.get().strip() or '-'}")
         sections.append(f"Aktueller Status: {self.status_var.get()}")
         sections.append(f"EPG-Suche aktiv: {'ja' if self.epg_enabled_var.get() else 'nein'}")
         sections.append("")
