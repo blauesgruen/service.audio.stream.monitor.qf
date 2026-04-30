@@ -15,7 +15,7 @@
 - `app/now_playing_discovery.py`
   - Generische Suche nach XML/JSON/JSONP/HTML-Songquellen und Parsing inkl. offizieller GraphQL-Track-Feeds.
 - `app/station_identity.py`
-  - Gemeinsame Stations-Normalisierung, ID-First-Lookup, Variantenbildung und `station_key`-Helfer.
+  - Gemeinsame Stations-Normalisierung, Name-First-Lookup mit optionalem Station-ID-Fallback, Variantenbildung und `station_key`-Helfer.
 - `app/source_policy.py`
   - Gemeinsame Origin-Domain-Ermittlung und Source-Policy-Klassifikation.
 - `app/song_probe.py`
@@ -71,7 +71,7 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 1. Eingabe vom Nutzer
 2. Entscheidung:
    - URL -> direkt `StreamResolver`
-   - Name mit optionaler `Station-ID` -> `find_station_with_optional_id(...)` -> `StationLookupService` -> Stream-Seed
+   - Name mit optionaler `Station-ID` -> erst `find_station_by_name_with_fallback(...)`, bei Miss `find_by_id(...)` ueber `find_station_with_optional_id(...)` -> `StationLookupService` -> Stream-Seed
    - Name ohne `Station-ID` -> `find_station_by_name_with_fallback(...)` -> `StationLookupService` -> Stream-Seed
 3. `StreamResolver.resolve()`
    - Redirect verfolgen
@@ -118,7 +118,7 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - Vollkette: gemeinsamer Lookup-Fallback -> Resolve -> gemeinsame Origin-Domain-Ermittlung ->
   gemeinsamer Probe-Kern (`SongProbeSession`) -> gemeinsame Song-Parity (`SongParityPolicy`) ->
   Policy/Parity-Entscheidung, nur wenn Fastpath/Cache keinen verwertbaren Zustand liefern.
-- Bei gesetzter `StationId` versucht der gemeinsame Lookup-Pfad zuerst `find_by_id(...)`; bei Miss folgt der normale Namenspfad.
+- Bei gesetzter `StationId` versucht der gemeinsame Lookup-Pfad zuerst den normalen Namenspfad; nur bei Miss folgt `find_by_id(...)` als stabiler Fallback.
 - Discovery priorisiert Kandidaten zentral: offizielle HTML-Now-Playing-Kandidaten zuerst, danach starke strukturierte Feed-URLs, dann Rest.
 
 ### Parity-Entscheidung (Kodi-Bridge)

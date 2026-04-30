@@ -4,10 +4,10 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 
 ## Features
 - Eingabe eines Sendernamens oder einer Sender-/Playlist-URL
-- Optionaler `Station-ID`-/Slug-Hinweis in GUI und Kodi-Bridge fuer einen stabileren Sender-Lookup
+- Optionaler `Station-ID`-/Slug-Hinweis in GUI und Kodi-Bridge als stabiler Fallback fuer den Sender-Lookup
 - Automatische Sender-Suche per Name (Radio-Browser API)
 - Sendernamen-Lookup mit generischen Token-Varianten (z. B. Teilphrasen), ohne sender-spezifische Sonderfaelle
-- ID-First-Lookup fuer Radio-Browser-UUIDs oder stabile Slugs mit zusaetzlichem Web-Directory-Fallback
+- Name-First-Lookup mit optionalem `Station-ID`-/Slug-Fallback fuer Radio-Browser-UUIDs oder stabile Slugs, inkl. zusaetzlichem Web-Directory-Fallback
 - Auflösung zur Original-Stream-Quelle (Redirects + `m3u`/`pls`/`xspf`)
 - Generische Now-Playing-Discovery (keine sender-spezifischen Hardcodes)
 - Abruf der aktuellen Songinfo per ICY-Metadaten (`StreamTitle`)
@@ -84,7 +84,7 @@ Danach kann sie über **"Verifiziert speichern"** in die DB geschrieben werden.
 - `app/stream_resolver.py`: URL-/Playlist-Auflösung
 - `app/metadata.py`: Song-Metadaten-Leser
 - `app/now_playing_discovery.py`: generische Feed-Suche + artist/title-Parsing
-- `app/station_identity.py`: gemeinsame Stations-Normalisierung, ID-First-Lookup, Variantenbildung und station_key-Helfer
+- `app/station_identity.py`: gemeinsame Stations-Normalisierung, Name-First-Lookup mit optionalem Station-ID-Fallback, Variantenbildung und station_key-Helfer
 - `app/source_policy.py`: gemeinsame Origin-Domain- und Source-Policy-Helfer
 - `app/song_probe.py`: gemeinsamer Probe-/Auswahlkern fuer ICY + Feed-Discovery
 - `app/song_parity.py`: gemeinsame Song-Zustandsmaschine fuer Hold, Songende und Reappearance-Sperre

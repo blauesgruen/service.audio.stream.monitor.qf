@@ -23,7 +23,7 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
 - `app/now_playing_discovery.py`
   - Web-Discovery + XML/JSON/JSONP/HTML/GraphQL Parsing -> SongInfo
 - `app/station_identity.py`
-  - gemeinsame Stations-Normalisierung, Lookup-Varianten und `station_key`-Hilfen
+  - gemeinsame Stations-Normalisierung, Lookup-Varianten, Name-First- und Station-ID-Fallback-Helfer sowie `station_key`-Hilfen
 - `app/source_policy.py`
   - gemeinsame Origin-Domain-Ermittlung und Source-Policy-Klassifikation
 - `app/song_probe.py`
@@ -45,7 +45,7 @@ Der kritische Pfad liegt nicht mehr vollstaendig in einer UI- oder Kodi-spezifis
 sondern im gemeinsamen Kern aus `app/`:
 
 1. `find_station_with_optional_id(...)`
-   - gemeinsamer ID-First-Lookup; faellt bei Bedarf auf den Namens-Lookup mit generischen Varianten zurueck
+   - gemeinsamer Name-First-Lookup; faellt bei Bedarf auf den Station-ID-/Slug-Lookup zurueck
 2. `StreamResolver.resolve(...)`
 3. `collect_origin_domains(...)`
 4. `SongProbeSession.probe_once()`
@@ -184,7 +184,7 @@ Oeffentliche Helfer:
 
 Wichtig:
 
-- kapselt die gemeinsame Stations-Normalisierung und den gemeinsamen ID-First-Lookup fuer GUI und Kodi
+- kapselt die gemeinsame Stations-Normalisierung und den gemeinsamen Name-First-Lookup mit Station-ID-Fallback fuer GUI und Kodi
 - reduziert Drift zwischen GUI-Lookup, Kodi-DB-Lookup und Cache-/Supersede-Logik
 
 #### `source_policy.py`
