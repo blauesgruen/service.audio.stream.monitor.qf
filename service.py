@@ -4,6 +4,7 @@ import re
 import sqlite3
 import sys
 import time
+import traceback
 
 import xbmc
 import xbmcaddon
@@ -259,6 +260,13 @@ class QFBridgeService(xbmc.Monitor):
         except Exception as err:
             self._imports_ready = False
             self._import_error = str(err)
+            self.logger.error(
+                "import_failed_detail",
+                error_type=type(err).__name__,
+                import_root=root,
+            )
+            for line in traceback.format_exc().rstrip().splitlines():
+                self.logger.error("import_failed_trace", message=line)
             return False
 
         self._imports_ready = True
@@ -775,6 +783,14 @@ class QFBridgeService(xbmc.Monitor):
         if not fast_song:
             return None, f"probe_{candidate_kind}_{probe_state}"
 
+        candidate_station_name = str(candidate.get("station_name") or "").strip()
+        if not candidate_station_name:
+            candidate_station_name = str(candidate_meta.get("station_name") or "").strip()
+        if not candidate_station_name:
+            candidate_station_name = str(candidate_meta.get("station_input") or "").strip()
+        if not candidate_station_name:
+            candidate_station_name = station_name_hint
+
         return {
             "status": "hit",
             "artist": fast_song.artist,
@@ -782,7 +798,7 @@ class QFBridgeService(xbmc.Monitor):
             "source": fast_song.source_kind,
             "reason": "verified_source_fastpath",
             "meta": {
-                "station": station_name_hint,
+                "station": candidate_station_name,
                 "source_approval": "verified_source_cache",
                 "source_url": fast_song.source_url or verified_source_url,
                 "resolved_url": "",
@@ -1457,9 +1473,33 @@ class QFBridgeService(xbmc.Monitor):
                     stream_seed = station.stream_url
                 except Exception as err:
                     self.logger.warning("station_lookup_failed", station=station_input, station_id=station_id_norm, error=str(err))
+                    if not self.is_probable_url(station_input):
+                        stream_seed = ""
             elif not self.is_probable_url(station_input) and station_input:
-                station = self._find_station_by_name_with_fallback(lookup, station_input)
-                stream_seed = station.stream_url
+                try:
+                    station = self._find_station_by_name_with_fallback(lookup, station_input)
+                    stream_seed = station.stream_url
+                except Exception as err:
+                    self.logger.warning("station_lookup_failed", station=station_input, error=str(err))
+                    stream_seed = ""
+
+            stream_seed = str(stream_seed or "").strip()
+            if not stream_seed:
+                no_seed_reason = "station_lookup_failed" if station_id_norm else "missing_station"
+                no_seed_meta = {
+                    "station": station.name if station else station_input,
+                    "station_id": station_id_value,
+                }
+                if station_id_norm and not station_input:
+                    no_seed_meta["lookup_mode"] = "station_id_only"
+                return {
+                    "status": "no_hit",
+                    "artist": "",
+                    "title": "",
+                    "source": "",
+                    "reason": no_seed_reason,
+                    "meta": no_seed_meta,
+                }
 
             resolved = resolver.resolve(stream_seed, original_input=station_input)
             if station:

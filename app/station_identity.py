@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Callable
+from typing import Callable, List, Optional
 
 
 def normalize_station_name(value: str) -> str:
@@ -41,12 +41,12 @@ def compact_station_text(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", text)
 
 
-def build_station_lookup_variants(value: str) -> list[str]:
+def build_station_lookup_variants(value: str) -> List[str]:
     raw = sanitize_station_text(value)
     if not raw:
         return []
 
-    variants: list[str] = []
+    variants: List[str] = []
     seen = set()
 
     def add(candidate: str) -> None:
@@ -73,8 +73,8 @@ def find_station_by_name_with_fallback(
     station_input: str,
     *,
     station_id: str = "",
-    on_variant_failed: Callable[[str, Exception], None] | None = None,
-    on_variant_selected: Callable[[str, object], None] | None = None,
+    on_variant_failed: Optional[Callable[[str, Exception], None]] = None,
+    on_variant_selected: Optional[Callable[[str, object], None]] = None,
 ):
     station_id_norm = normalize_station_id(station_id)
     variants = build_station_lookup_variants(station_input)
@@ -105,13 +105,24 @@ def find_station_with_optional_id(
     *,
     station_id: str = "",
     allow_name_fallback: bool = True,
-    on_station_id_failed: Callable[[str, Exception], None] | None = None,
-    on_station_id_selected: Callable[[str, object], None] | None = None,
-    on_variant_failed: Callable[[str, Exception], None] | None = None,
-    on_variant_selected: Callable[[str, object], None] | None = None,
+    on_station_id_failed: Optional[Callable[[str, Exception], None]] = None,
+    on_station_id_selected: Optional[Callable[[str, object], None]] = None,
+    on_variant_failed: Optional[Callable[[str, Exception], None]] = None,
+    on_variant_selected: Optional[Callable[[str, object], None]] = None,
 ):
     station_id_norm = normalize_station_id(station_id)
     last_error = None
+
+    if station_input:
+        try:
+            return find_station_by_name_with_fallback(
+                lookup_service,
+                station_input,
+                on_variant_failed=on_variant_failed,
+                on_variant_selected=on_variant_selected,
+            )
+        except Exception as err:
+            last_error = err
 
     if station_id_norm:
         try:
@@ -125,15 +136,6 @@ def find_station_with_optional_id(
                 on_station_id_failed(station_id_norm, err)
             if not allow_name_fallback:
                 raise
-
-    if station_input:
-        return find_station_by_name_with_fallback(
-            lookup_service,
-            station_input,
-            station_id=station_id_norm,
-            on_variant_failed=on_variant_failed,
-            on_variant_selected=on_variant_selected,
-        )
 
     raise last_error if last_error else ValueError("Kein passender Sender gefunden.")
 

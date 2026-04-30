@@ -44,7 +44,7 @@ class VerifiedSourceRepository:
             try:
                 row = conn.execute(
                     """
-                    SELECT source_url, source_url_norm, confidence, last_seen_ts, verified_at_utc, meta_json
+                    SELECT station_name, source_url, source_url_norm, confidence, last_seen_ts, verified_at_utc, meta_json
                     FROM verified_station_sources
                     WHERE station_key = ?
                     ORDER BY confidence DESC, last_seen_ts DESC
@@ -69,12 +69,13 @@ class VerifiedSourceRepository:
             self._trace("verified_source_lookup_miss", key)
             return None
 
-        source_url = str(row[0] or "").strip()
+        station_name = str(row[0] or "").strip()
+        source_url = str(row[1] or "").strip()
         source_url_norm = self._normalize_url(source_url)
         if not source_url or not source_url_norm:
             return None
 
-        last_seen_ts = int(row[3] or 0)
+        last_seen_ts = int(row[4] or 0)
         if max_age_seconds > 0 and last_seen_ts > 0:
             age_seconds = max(0, now_ts - last_seen_ts)
             if age_seconds > int(max_age_seconds):
@@ -83,13 +84,14 @@ class VerifiedSourceRepository:
 
         return {
             "station_key": key,
+            "station_name": station_name,
             "source_url": source_url,
             "source_url_norm": source_url_norm,
-            "confidence": float(row[2] or 0.0),
+            "confidence": float(row[3] or 0.0),
             "last_seen_ts": last_seen_ts,
-            "verified_at_utc": str(row[4] or ""),
-            "meta_json": str(row[5] or ""),
-            "meta": self._parse_meta_json(row[5]),
+            "verified_at_utc": str(row[5] or ""),
+            "meta_json": str(row[6] or ""),
+            "meta": self._parse_meta_json(row[6]),
         }
 
     def _extract_name_key_tokens(self, station_key: str) -> list[str]:
@@ -117,7 +119,7 @@ class VerifiedSourceRepository:
         like_prefix = f"{station_key} %"
         rows = conn.execute(
             """
-            SELECT source_url, source_url_norm, confidence, last_seen_ts, verified_at_utc, meta_json
+            SELECT station_name, source_url, source_url_norm, confidence, last_seen_ts, verified_at_utc, meta_json
             FROM verified_station_sources
             WHERE station_key LIKE ? OR ? LIKE station_key || ' %'
             ORDER BY confidence DESC, last_seen_ts DESC

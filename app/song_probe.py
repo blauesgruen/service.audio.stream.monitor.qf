@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Tuple
 
 from .models import ResolvedStream, SongInfo, StationMatch
 from .source_policy import classify_song_source, is_allowed_song_source
 
 
-PairValidator = Callable[[str, str], tuple[str, str, str]]
+PairValidator = Callable[[str, str], Tuple[str, str, str]]
 PairPredicate = Callable[[str, str], bool]
 
 
