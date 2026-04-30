@@ -2723,16 +2723,19 @@ class NowPlayingDiscoveryService:
         resolved: ResolvedStream,
         station: StationMatch | None,
     ) -> list[dict[str, str]]:
-        comparable_urls = {
-            self._normalize_stream_match_url(url)
-            for url in (
-                resolved.input_url,
-                resolved.resolved_url,
-                resolved.delivery_url,
-                station.stream_url if station else "",
+        comparable_urls = [
+            normalized
+            for normalized in (
+                self._normalize_stream_match_url(url)
+                for url in (
+                    resolved.input_url,
+                    resolved.resolved_url,
+                    resolved.delivery_url,
+                    station.stream_url if station else "",
+                )
             )
-            if self._normalize_stream_match_url(url)
-        }
+            if normalized
+        ]
         station_hints = build_station_hints((station.name if station else "", resolved.station_name or ""))
         compact_hints = {compact_station_compare_text(hint) for hint in station_hints if compact_station_compare_text(hint)}
 
@@ -2740,7 +2743,10 @@ class NowPlayingDiscoveryService:
         label_matches = []
         for entry in catalog:
             entry_url = self._normalize_stream_match_url(entry.get("url") or "")
-            if entry_url and entry_url in comparable_urls:
+            if entry_url and any(
+                self._stream_match_urls_compatible(entry_url, comparable_url)
+                for comparable_url in comparable_urls
+            ):
                 exact_matches.append(entry)
                 continue
 
@@ -2757,6 +2763,27 @@ class NowPlayingDiscoveryService:
             return ""
         path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
         return f"{parsed.netloc.lower()}{path.lower()}"
+
+    def _stream_match_urls_compatible(self, left: str, right: str) -> bool:
+        left = str(left or "").strip().lower().strip("/")
+        right = str(right or "").strip().lower().strip("/")
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+
+        left_host, _, left_path = left.partition("/")
+        right_host, _, right_path = right.partition("/")
+        if left_host != right_host:
+            return False
+
+        left_parts = [part for part in left_path.split("/") if part]
+        right_parts = [part for part in right_path.split("/") if part]
+        if not left_parts or not right_parts:
+            return False
+
+        shorter, longer = (left_parts, right_parts) if len(left_parts) <= len(right_parts) else (right_parts, left_parts)
+        return shorter == longer[: len(shorter)]
 
     def _build_graphql_tracks_candidate_url(self, endpoint: str, stream_id: str) -> str:
         parsed = urlparse(endpoint)
