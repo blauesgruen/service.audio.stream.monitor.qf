@@ -31,6 +31,10 @@ from .config import (
     NOWPLAYING_CANDIDATE_KEYWORDS,
     NOWPLAYING_HTML_EDITORIAL_TOKENS,
     NOWPLAYING_QUERY_CONTEXT_IGNORE_TOKENS,
+    PROVIDER_BCS_BASE_DOMAINS,
+    PROVIDER_BCS_GENERIC_NAME_TOKENS,
+    PROVIDER_BCS_IFRAME_HOST,
+    PROVIDER_BCS_WEBRADIO_HOST,
     PROVIDER_BR_BASE_DOMAINS,
     PROVIDER_NDR_BASE_DOMAINS,
     STATION_LOOKUP_OPTIONAL_PREFIX_TOKENS,
@@ -124,6 +128,9 @@ query TracksQuery($id: ID!) {
 GRAPHQL_TRACKS_MODE_PARAM = "_qf_np"
 GRAPHQL_TRACKS_MODE_VALUE = "graphql_stream_tracks"
 GRAPHQL_TRACKS_ID_PARAM = "stream_id"
+BCS_CURRENT_MODE_PARAM = "_qf_bcs"
+BCS_CURRENT_MODE_VALUE = "current_station"
+BCS_CURRENT_STATION_PARAM = "station"
 RADIOPLAYER_EVENT_TITLE_KEYS = {"name", "title", "song", "track"}
 RADIOPLAYER_EVENT_ARTIST_KEYS = {"artistname", "artist_name", "artist"}
 
@@ -224,6 +231,7 @@ class NowPlayingDiscoveryService:
             "official_player": 0.0,
             "playerbar": 0.0,
             "graphql": 0.0,
+            "bcs": 0.0,
             "loverad": 0.0,
             "ranking": 0.0,
         }
@@ -349,6 +357,13 @@ class NowPlayingDiscoveryService:
             candidates.add(feed_url)
             self._mark_trusted_candidate(feed_url)
 
+        phase_started = time.perf_counter()
+        bcs_station_feeds = self._discover_bcs_station_feed_urls(document_index, resolved, station)
+        phase_timings["bcs"] = time.perf_counter() - phase_started
+        for feed_url in bcs_station_feeds:
+            candidates.add(feed_url)
+            self._mark_trusted_candidate(feed_url)
+
         derived_html_candidates = set()
         for candidate in list(candidates):
             for derived in self._generate_html_nowplaying_variants(candidate):
@@ -403,6 +418,7 @@ class NowPlayingDiscoveryService:
             f"official_player={phase_timings['official_player']:.2f}s "
             f"playerbar={phase_timings['playerbar']:.2f}s "
             f"graphql={phase_timings['graphql']:.2f}s "
+            f"bcs={phase_timings['bcs']:.2f}s "
             f"loverad={phase_timings['loverad']:.2f}s "
             f"ranking={phase_timings['ranking']:.2f}s "
             f"total={total_elapsed:.2f}s "
@@ -433,6 +449,8 @@ class NowPlayingDiscoveryService:
     def _probe_feed_candidate(self, url: str) -> SongInfo | None:
         if self._is_graphql_tracks_candidate(url):
             return self._probe_graphql_tracks_candidate(url)
+        if self._is_bcs_current_candidate(url):
+            return self._probe_bcs_current_candidate(url)
         request_url = url if self._looks_like_html_nowplaying_endpoint(url) else self._cache_bust_url(url)
         text, content_type = self._fetch_text(request_url)
         if not text:
@@ -732,6 +750,280 @@ class NowPlayingDiscoveryService:
             seen.add(slug)
             slugs.append(slug)
         return slugs[:6]
+
+    def _is_bcs_context(
+        self,
+        base_domains: set[str],
+    ) -> bool:
+        return any(domain in base_domains for domain in PROVIDER_BCS_BASE_DOMAINS)
+
+    def _discover_bcs_station_feed_urls(
+        self,
+        documents: list[tuple[str, str, list[str]]],
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> set[str]:
+        base_domains = {
+            base
+            for base in (
+                get_base_domain(resolved.resolved_url),
+                get_base_domain(resolved.delivery_url),
+                get_base_domain(station.homepage if station else ""),
+            )
+            if base
+        }
+        if not self._is_bcs_context(base_domains):
+            return set()
+
+        page_urls = set()
+        for alias in self._build_bcs_channel_aliases(resolved, station):
+            page_urls.add(f"https://{PROVIDER_BCS_WEBRADIO_HOST}/{alias}")
+            page_urls.add(
+                f"https://{PROVIDER_BCS_IFRAME_HOST}/player/iframe/?no_cache=1&referer=/{alias}&v=2"
+            )
+            page_urls.add(f"https://{PROVIDER_BCS_IFRAME_HOST}/player/iframe/{alias}")
+
+        for doc_url, _, extracted_urls in documents:
+            for candidate in [doc_url, *extracted_urls]:
+                parsed = urlparse(candidate or "")
+                host = (parsed.netloc or "").lower()
+                if host in {PROVIDER_BCS_WEBRADIO_HOST, PROVIDER_BCS_IFRAME_HOST}:
+                    page_urls.add(candidate)
+
+        if not page_urls:
+            return set()
+
+        document_lookup = {
+            str(doc_url or "").strip(): text
+            for doc_url, text, _ in documents
+            if str(doc_url or "").strip() and text
+        }
+
+        feeds = set()
+        for page_url in sorted(page_urls):
+            text = document_lookup.get(page_url, "")
+            if not text:
+                text, _ = self._fetch_text(page_url)
+            if not text:
+                continue
+            feeds.update(self._extract_bcs_station_feed_candidates(page_url, text))
+
+        if feeds:
+            self._log(f"BCS-Station-Feeds gefunden: {len(feeds)}")
+        return feeds
+
+    def _build_bcs_channel_aliases(
+        self,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> list[str]:
+        aliases: list[str] = []
+        seen = set()
+
+        for url_value in (
+            resolved.delivery_url,
+            resolved.resolved_url,
+            station.stream_url if station else "",
+        ):
+            for alias in self._extract_bcs_aliases_from_stream_url(url_value):
+                if alias not in seen:
+                    seen.add(alias)
+                    aliases.append(alias)
+
+        for name_value in (
+            station.name if station else "",
+            resolved.station_name or "",
+        ):
+            for alias in self._extract_bcs_aliases_from_station_name(name_value):
+                if alias not in seen:
+                    seen.add(alias)
+                    aliases.append(alias)
+
+        return aliases[:8]
+
+    def _extract_bcs_aliases_from_stream_url(self, url: str) -> list[str]:
+        parsed = urlparse(self._normalize_seed(url))
+        host = (parsed.netloc or "").lower()
+        parts = [part.strip().lower() for part in parsed.path.split("/") if part.strip()]
+        aliases: list[str] = []
+
+        if host.endswith(".radio.hitradio-rtl.de") and parts:
+            stream_key = parts[0]
+            if stream_key.startswith("hrrtl-") and len(stream_key) > len("hrrtl-"):
+                aliases.append(stream_key[len("hrrtl-") :])
+
+        if get_base_domain(host) == "bcs-systems.de" and len(parts) >= 2 and parts[0] == "hrrtl":
+            candidate = parts[1]
+            if candidate not in {"mp3", "aac", "web"}:
+                aliases.append("livestream" if candidate == "livestream" else candidate)
+
+        return [alias for alias in aliases if re.fullmatch(r"[a-z0-9-]{2,32}", alias)]
+
+    def _extract_bcs_aliases_from_station_name(self, value: str) -> list[str]:
+        aliases = []
+        for token in split_search_tokens(value):
+            token = token.strip().lower()
+            if not token:
+                continue
+            if token in PROVIDER_BCS_GENERIC_NAME_TOKENS:
+                continue
+            if not re.fullmatch(r"[a-z0-9-]{2,32}", token):
+                continue
+            aliases.append(token)
+        return aliases
+
+    def _extract_bcs_station_feed_candidates(self, page_url: str, text: str) -> set[str]:
+        if not text:
+            return set()
+
+        feed_urls = set()
+        normalized_text = html.unescape(html.unescape(text)).replace("\\/", "/")
+
+        def _append_candidate(json_url: str, station_key: str) -> None:
+            resolved_json_url = html.unescape(json_url.strip())
+            normalized_station_key = station_key.strip().lower()
+            if not is_probable_url(resolved_json_url):
+                resolved_json_url = urljoin(page_url, resolved_json_url)
+            if not is_probable_url(resolved_json_url):
+                return
+            if not re.fullmatch(r"[a-z0-9-]{2,32}", normalized_station_key):
+                return
+            feed_urls.add(self._build_bcs_current_candidate_url(resolved_json_url, normalized_station_key))
+
+        script_blocks = re.findall(
+            r"<script\b[^>]*>(.*?)</script>",
+            normalized_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        assignment_pattern = re.compile(
+            r"jsonUrl\s*=\s*['\"]([^'\"]+)['\"].{0,800}?station\s*=\s*['\"]([^'\"]+)['\"]",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for block in script_blocks:
+            for match in assignment_pattern.finditer(block):
+                _append_candidate(match.group(1), match.group(2))
+
+        if feed_urls:
+            return feed_urls
+
+        json_match = re.search(r"jsonUrl\s*=\s*['\"]([^'\"]+)['\"]", normalized_text, flags=re.IGNORECASE)
+        if not json_match:
+            return feed_urls
+        search_start = json_match.end()
+        station_match = re.search(
+            r"station\s*=\s*['\"]([^'\"]+)['\"]",
+            normalized_text[search_start : search_start + 800],
+            flags=re.IGNORECASE,
+        )
+        if station_match:
+            _append_candidate(json_match.group(1), station_match.group(1))
+        return feed_urls
+
+    def _build_bcs_current_candidate_url(self, feed_url: str, station_key: str) -> str:
+        parsed = urlparse(feed_url)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query[BCS_CURRENT_MODE_PARAM] = BCS_CURRENT_MODE_VALUE
+        query[BCS_CURRENT_STATION_PARAM] = station_key
+        return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+
+    def _get_bcs_current_candidate_station(self, url: str) -> str:
+        parsed = urlparse(url or "")
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        return str(query.get(BCS_CURRENT_STATION_PARAM) or "").strip().lower()
+
+    def _is_bcs_current_candidate(self, url: str) -> bool:
+        parsed = urlparse(url or "")
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        return query.get(BCS_CURRENT_MODE_PARAM) == BCS_CURRENT_MODE_VALUE and bool(
+            query.get(BCS_CURRENT_STATION_PARAM)
+        )
+
+    def _probe_bcs_current_candidate(self, url: str) -> SongInfo | None:
+        parsed = urlparse(url or "")
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        station_key = str(query.pop(BCS_CURRENT_STATION_PARAM, "") or "").strip().lower()
+        mode_value = str(query.pop(BCS_CURRENT_MODE_PARAM, "") or "").strip()
+        if mode_value != BCS_CURRENT_MODE_VALUE or not station_key:
+            return None
+
+        request_url = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+        payload_text, content_type = self._fetch_text(self._cache_bust_url(request_url))
+        if not payload_text:
+            return None
+        if not self._is_json_candidate(request_url, content_type, payload_text):
+            return None
+
+        payload_text = self._unwrap_jsonp_payload(payload_text)
+        try:
+            data = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return None
+
+        station_node = self._select_bcs_current_station_entry(data, station_key)
+        if not isinstance(station_node, dict):
+            return None
+
+        title = self._extract_json_value(station_node, TITLE_KEYS).strip()
+        artist = self._extract_artist_from_node(station_node).strip()
+        if title and not artist:
+            split_artist, split_title = self._split_compound_title(title)
+            if split_artist and split_title:
+                artist = split_artist
+                title = split_title
+        if not title and not artist:
+            return None
+
+        stream_title = f"{artist} - {title}".strip(" -")
+        return SongInfo(
+            stream_title=stream_title,
+            raw_metadata=payload_text,
+            artist=artist,
+            title=title,
+            source_kind="web_feed_json",
+            source_url=url,
+        )
+
+    def _select_bcs_current_station_entry(self, payload: dict | list, station_key: str) -> dict | None:
+        if not isinstance(payload, dict):
+            return None
+        root = payload.get("data")
+        if not isinstance(root, dict):
+            return None
+
+        direct = root.get(station_key)
+        if isinstance(direct, dict):
+            return direct
+
+        station_compact = re.sub(r"[^a-z0-9]", "", station_key.lower())
+        for key, value in root.items():
+            if not isinstance(value, dict):
+                continue
+            key_compact = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
+            if key_compact == station_compact:
+                return value
+        return None
+
+    def _bcs_station_selector_matches_context(
+        self,
+        url: str,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> bool:
+        station_key = self._get_bcs_current_candidate_station(url)
+        if not station_key:
+            return False
+
+        aliases = self._build_bcs_channel_aliases(resolved, station)
+        if not aliases:
+            return True
+        if station_key in aliases:
+            return True
+
+        compact_station_key = re.sub(r"[^a-z0-9]", "", station_key)
+        for alias in aliases:
+            if re.sub(r"[^a-z0-9]", "", alias) == compact_station_key:
+                return True
+        return False
 
     def _extract_radio_directory_slug(self, homepage: str) -> str:
         parsed = urlparse((homepage or "").strip())
@@ -2173,6 +2465,12 @@ class NowPlayingDiscoveryService:
         if input_base and candidate_base == input_base:
             score += 15
 
+        if self._is_bcs_current_candidate(url):
+            if self._bcs_station_selector_matches_context(url, resolved, station):
+                score += 120
+            else:
+                score -= 120
+
         return score
 
     def _candidate_matches_input_context(
@@ -2198,6 +2496,8 @@ class NowPlayingDiscoveryService:
         same_stream_domain = bool(candidate_base and candidate_base in stream_bases)
         if parsed.netloc == "brradio.br.de" and parsed.path == "/radio/v4":
             return True
+        if self._is_bcs_current_candidate(url):
+            return self._bcs_station_selector_matches_context(url, resolved, station)
         is_radiomodul = "radiomodul" in lower_url
         is_playlist_like = any(
             token in lower_url

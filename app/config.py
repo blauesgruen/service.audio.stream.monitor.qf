@@ -43,6 +43,22 @@ PROVIDER_NDR_BASE_DOMAINS = {
     "ndr.de",
 }
 
+PROVIDER_BCS_BASE_DOMAINS = {
+    "bcs-systems.de",
+    "hitradio-rtl.de",
+}
+PROVIDER_BCS_WEBRADIO_HOST = "webradio.hitradio-rtl.de"
+PROVIDER_BCS_IFRAME_HOST = "iframe.hitradio-rtl.de"
+PROVIDER_BCS_GENERIC_NAME_TOKENS = {
+    "hitradio",
+    "rtl",
+    "radio",
+    "sachsen",
+    "oldie",
+    "stream",
+    "live",
+}
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "radio_sources.db"
 
