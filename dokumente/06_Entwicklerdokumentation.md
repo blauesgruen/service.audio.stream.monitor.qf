@@ -164,12 +164,13 @@ Wichtig:
 - Frischelogik ueber `MAX_NOWPLAYING_AGE_MINUTES`
 - zusaetzlich Dauerfenster pruefung ueber `starttime + duration + NOWPLAYING_DURATION_GRACE_SECONDS`
 - JSON-Kandidaten werden nicht nur nach `artist/title`, sondern auch nach aktivem Zeitfenster und Zustandsfeldern wie `playingMode` gescored
-- JSONP-Payloads werden zentral entpackt; offizielle GraphQL-Track-Feeds werden ueber denselben Parse-/Zeitfenster-Kern bewertet
+- JSONP-Payloads werden zentral entpackt; offizielle GraphQL-Track-Feeds werden ueber einen spezialisierten Zeitfenster-Pfad bewertet
+- providerweite BCS-Player koennen aus offiziellen `webradio`-/`iframe`-Seiten ein strukturiertes Paar aus `jsonUrl` + `station` ableiten; der gemeinsame JSON-Feed wird danach gezielt auf den passenden Unterkanal reduziert
 - HTTP-Transport mit Best-Effort-Fallback (`https` -> unverified SSL bei Cert-Fehler -> optional `http`)
 - `trusted` markiert Discovery-Quellen aus offizieller Player-Kette; nur mit `ALLOW_OFFICIAL_CHAIN_SOURCES=True` zusaetzlich erlaubt
 - zusaetzliche generische Player-Config-Extraktion (`data-mandate` + `webradio.js` -> `config.json` -> `currentUrl`/`playlistUrl`)
 - zusaetzliche schmale Playerbar-Extraktion: offizielle `playerbarContainer.json`-Dokumente werden nur bei echtem Stream-Match verfolgt und liefern dann ihre `playlist.feedUrl` als Kandidat
-- offizielle Frontends koennen zusaetzlich generische GraphQL-Track-Kandidaten liefern; die Auswahl des aktiven Tracks bleibt dabei in den zentralen Zeitfenster-Helfern
+- offizielle Frontends koennen zusaetzlich generische GraphQL-Track-Kandidaten liefern; die Auswahl des aktiven Tracks bleibt dabei in den zentralen Zeitfenster-Helfern, faellt bei fehlendem aktivem Eintrag aber bewusst nicht auf den generischen JSON-Walk zurueck
 
 ### Shared-Kernmodule (`app/`)
 

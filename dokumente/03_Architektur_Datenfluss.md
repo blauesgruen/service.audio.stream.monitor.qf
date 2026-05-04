@@ -13,7 +13,7 @@
 - `app/metadata.py`
   - ICY-Metadaten lesen (`StreamTitle`, Header) und Metadaten-Texte zentral normalisieren.
 - `app/now_playing_discovery.py`
-  - Generische Suche nach XML/JSON/JSONP/HTML-Songquellen und Parsing inkl. offizieller GraphQL-Track-Feeds.
+  - Generische Suche nach XML/JSON/JSONP/HTML-Songquellen und Parsing inkl. offizieller GraphQL-Track-Feeds sowie providerweiter BCS-Current-Feeds mit zusaetzlichem Kanal-Selektor.
 - `app/station_identity.py`
   - Gemeinsame Stations-Normalisierung, Name-First-Lookup mit optionalem Station-ID-Fallback, Variantenbildung und `station_key`-Helfer.
 - `app/source_policy.py`
@@ -81,6 +81,7 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 5. `SongProbeSession.probe_once()`
    - ICY lesen
    - Feed-Kandidaten entdecken und priorisieren
+   - providerstrukturierte Kandidaten (z. B. GraphQL-Tracklisten oder BCS-`jsonUrl + station`) ueber den zentralen Discovery-Kern in konkrete Songquellen ueberfuehren
    - Redirect-/Canonical-nahe Discovery-Dokumente und offizielle Player-Ketten nach weiteren Feed-Kandidaten scannen
    - XML/JSON/HTML Kandidaten abrufen (seriell oder parallel in Batches)
    - finalen Song zentral anhand Pair-Validierung und Source-Policy bestimmen

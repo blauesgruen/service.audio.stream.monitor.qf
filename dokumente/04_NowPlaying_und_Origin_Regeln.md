@@ -48,6 +48,7 @@ Zusatzlogik:
 - `avcustom`-Dokumente werden extra verfolgt
 - offizielle `playerbarContainer.json`-Dokumente koennen zusaetzlich bis zur referenzierten `playlist.feedUrl` verfolgt werden, wenn ihr eingebetteter Audiostream zum aufgeloesten Sender passt
 - offizielle Frontends koennen zusaetzlich generische GraphQL-Track-Endpunkte liefern; diese werden nur als `trusted`-Kandidaten aus offizieller Player-Kette uebernommen
+- providerweite BCS-Player koennen aus offiziellen `webradio`-/`iframe`-Seiten ein Paar aus `jsonUrl` + `station` liefern; daraus entsteht ein strukturierter Kandidat fuer genau den passenden Unterkanal
 - Audio-/Video-Content wird als Discovery-Text verworfen
 - redaktionelle HTML-Seiten mit Podcast-/Artikel-Charakter ohne echte Now-Playing-Struktur werden nicht mehr als direkte HTML-Feed-Kandidaten bevorzugt
 
@@ -128,6 +129,8 @@ Weiterhin ausgeschlossen:
 - bevorzugt bei Listen-Feeds aktive Eintraege ueber Zeitfenster (`starttime + duration`) und Zustandsfelder wie `playingMode` statt blind den ersten Listeneintrag zu nehmen
 - JSONP-Wrapper wie `callback(...)` werden vor dem JSON-Parse generisch entpackt
 - offizielle GraphQL-Track-Feeds werden nach demselben Prinzip in normale Song-Kandidaten ueberfuehrt; auch dort entscheidet die zentrale Zeitfensterlogik ueber `now`, `expired` oder `future`
+- bei providerweiten BCS-Feeds wird vor dem eigentlichen Song-Parse zunaechst der passende Kanal ueber den offiziellen `station`-Selektor ausgewaehlt; erst danach greifen die normalen JSON-Feldheuristiken
+- bei synthetischen GraphQL-Track-Kandidaten wird bewusst kein generischer JSON-Fallback mehr benutzt, wenn die spezialisierte Tracklisten-Auswertung keinen aktiven Eintrag findet; dadurch werden alte Titel aus grossen Sendeplaenen nicht als falscher `current`-Song durchgereicht
 
 ### HTML
 
@@ -293,6 +296,7 @@ Damit werden reine Webradio-Streams haeufig robuster gefunden, ohne sender-spezi
 
 - Manche Sender liefern waehrend Jingles/Nachrichten absichtlich keine expliziten Artist/Title-Daten.
 - Manche Sender aktualisieren externe Feeds verzoegert.
+- Manche Webplayer schalten lokal aus einer bereits geladenen Trackliste weiter, waehrend der zugrunde liegende Provider-Feed kurzzeitig noch keinen neuen aktiven Eintrag liefert.
 - Ohne eindeutige Tokens in Quelle bleibt nur best-effort.
 
 Der Ansatz bleibt trotzdem robust, weil er mehrere Quellen parallel bewertet und nur eindeutige Daten akzeptiert.

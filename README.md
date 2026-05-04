@@ -18,6 +18,8 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Discovery kann bei offiziellen `playerbarContainer.json`-Dokumenten die darin referenzierte `playlist.feedUrl` verfolgen, sofern der eingebettete Stream eindeutig zum aufgeloesten Sender passt
 - Discovery kann JSONP-Feeds generisch entpacken und als normale JSON-Now-Playing-Quelle auswerten
 - Discovery kann offizielle GraphQL-Track-Feeds aus einer verlinkten Player-Kette generisch ableiten und ueber denselben Zeitfenster-/Policy-Kern bewerten
+- Discovery kann providerweite BCS-Current-Feeds aus offiziellen `webradio`-/`iframe`-Seiten ableiten und ueber einen zusaetzlichen `station`-Selektor gezielt den passenden Kanal aus einem gemeinsamen JSON waehlen
+- Offizielle GraphQL-Schedule-Feeds werden nur noch ueber ihre spezialisierte Zeitfenster-Auswertung bewertet; wenn dort kein aktiver Track vorliegt, faellt der Parser bewusst nicht auf einen generischen alten JSON-Track zurueck
 - Feed-Probing kann parallel in Batches laufen (`NOWPLAYING_PARALLEL_*` in `app/config.py`)
 - Discovery-Crawl fuer Seed-Seiten und Script-Assets kann begrenzt parallel laufen (`DISCOVERY_*` in `app/config.py`)
 - Generische Icecast/Shoutcast-Statusquellen werden mitberuecksichtigt (`status-json.xsl`, `status.xsl`, `stats`)
