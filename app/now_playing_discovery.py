@@ -1811,6 +1811,14 @@ class NowPlayingDiscoveryService:
         if not candidates:
             return None
 
+        return self._build_song_from_scored_candidates(candidates, payload, source_url)
+
+    def _build_song_from_scored_candidates(
+        self,
+        candidates: list[tuple[int, str, str, str, str, int | None]],
+        payload: str,
+        source_url: str,
+    ) -> SongInfo | None:
         candidates.sort(reverse=True, key=lambda item: item[0])
         best_score, artist, title, time_text, duration_text, age_minutes = candidates[0]
         title = title.strip()
@@ -1832,6 +1840,17 @@ class NowPlayingDiscoveryService:
             source_kind="web_feed_json",
             source_url=source_url,
         )
+
+    def _parse_graphql_tracks_payload(
+        self,
+        data: dict | list,
+        payload: str,
+        source_url: str,
+    ) -> SongInfo | None:
+        candidates = self._extract_graphql_stream_track_candidates(data)
+        if not candidates:
+            return None
+        return self._build_song_from_scored_candidates(candidates, payload, source_url)
 
     def _extract_radioplayer_event_candidates(
         self,
@@ -3107,7 +3126,8 @@ class NowPlayingDiscoveryService:
         payload = self._post_graphql_json(endpoint, GRAPHQL_TRACKS_QUERY, variables={"id": stream_id})
         if not payload:
             return None
-        return self._parse_json_payload(json.dumps(payload), url)
+        payload_text = json.dumps(payload)
+        return self._parse_graphql_tracks_payload(payload, payload_text, url)
 
     def _post_graphql_json(
         self,
