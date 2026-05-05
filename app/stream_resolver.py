@@ -18,7 +18,7 @@ from .config import (
     USER_AGENT,
 )
 from .models import ResolvedStream
-from .utils import is_probable_url
+from .utils import decode_text_bytes, is_probable_url
 
 
 class StreamResolveError(Exception):
@@ -95,7 +95,7 @@ class StreamResolver:
         return False
 
     def _extract_stream_from_playlist(self, payload: bytes, playlist_url: str) -> Optional[str]:
-        text = payload.decode("utf-8", errors="ignore")
+        text = decode_text_bytes(payload)
 
         m3u_url = self._extract_from_m3u(text, playlist_url)
         if m3u_url:

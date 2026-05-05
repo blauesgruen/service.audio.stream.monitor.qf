@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 from .config import REQUEST_TIMEOUT_SECONDS, STREAM_READ_BYTES, USER_AGENT
 from .models import SongInfo
 from .song_validation import is_valid_song_candidate
-from .utils import repair_mojibake_text
+from .utils import decode_text_bytes, repair_mojibake_text
 
 
 class MetadataError(Exception):
@@ -68,8 +68,10 @@ class SongMetadataFetcher:
                 raise MetadataError("Metadatenblock ist leer (keine Songinfo im aktuellen Slot).")
 
             metadata_block = response.read(metadata_length)
-            raw_text = metadata_block.decode("utf-8", errors="ignore").strip("\x00")
-            raw_text = repair_mojibake_text(raw_text)
+            raw_text = decode_text_bytes(
+                metadata_block,
+                content_type=response.headers.get("Content-Type") or "",
+            ).strip("\x00")
             stream_title = self._extract_stream_title(raw_text)
             source_headers = {key: value for key, value in response.headers.items()}
             station_name = response.headers.get("icy-name") or ""

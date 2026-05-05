@@ -43,6 +43,7 @@ from .config import (
 from .models import ResolvedStream, SongInfo, StationMatch
 from .song_validation import build_station_hints, compact_station_compare_text, is_valid_song_candidate
 from .utils import (
+    decode_text_bytes,
     get_base_domain,
     is_mixed_alnum_token,
     is_probable_url,
@@ -3151,7 +3152,10 @@ class NowPlayingDiscoveryService:
         )
         try:
             with urlopen(request, timeout=DISCOVERY_REQUEST_TIMEOUT_SECONDS, context=context) as response:
-                payload = response.read(DISCOVERY_READ_BYTES).decode("utf-8", errors="ignore")
+                payload = decode_text_bytes(
+                    response.read(DISCOVERY_READ_BYTES),
+                    content_type=response.headers.get("Content-Type") or "",
+                )
         except URLError as err:
             if context is None and isinstance(err.reason, ssl.SSLCertVerificationError):
                 insecure_context = ssl._create_unverified_context()
@@ -3832,7 +3836,7 @@ class NowPlayingDiscoveryService:
             if lower_type.startswith("audio/") or lower_type.startswith("video/"):
                 return "", content_type
             payload = response.read(DISCOVERY_READ_BYTES)
-            return payload.decode("utf-8", errors="ignore"), content_type
+            return decode_text_bytes(payload, content_type=content_type), content_type
 
     def _http_fallback_url(self, url: str) -> str:
         parsed = urlparse(url)

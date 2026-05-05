@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 
 from .config import NON_ORIGIN_ASSET_BASE_DOMAINS, NON_ORIGIN_DIRECTORY_BASE_DOMAINS
@@ -10,6 +11,7 @@ from .config import NON_ORIGIN_ASSET_BASE_DOMAINS, NON_ORIGIN_DIRECTORY_BASE_DOM
 TOKEN_SEPARATOR_RE = re.compile(r"[\W_]+", flags=re.UNICODE)
 UNICODE_LETTER_RE = re.compile(r"[^\W\d_]", flags=re.UNICODE)
 MOJIBAKE_HINT_RE = re.compile(r"(?:Ã.|Â.|â..)", flags=re.UNICODE)
+CHARSET_RE = re.compile(r"charset\s*=\s*['\"]?(?P<charset>[^;,'\"\s]+)", flags=re.IGNORECASE)
 
 
 def is_probable_url(value: str) -> bool:
@@ -99,3 +101,63 @@ def repair_mojibake_text(value: str) -> str:
     except (UnicodeEncodeError, UnicodeDecodeError):
         return text
     return repaired or text
+
+
+def extract_charset_from_content_type(content_type: str) -> str:
+    text = str(content_type or "").strip()
+    if not text:
+        return ""
+    match = CHARSET_RE.search(text)
+    if not match:
+        return ""
+    return match.group("charset").strip().strip("'\"").lower()
+
+
+def decode_text_bytes(
+    payload: bytes,
+    *,
+    content_type: str = "",
+    fallback_encodings: tuple[str, ...] = ("utf-8", "cp1252", "latin-1"),
+    apply_mojibake_repair: bool = True,
+) -> str:
+    data = payload or b""
+    if not data:
+        return ""
+
+    tried = set()
+    encodings: list[str] = []
+    declared_charset = extract_charset_from_content_type(content_type)
+    if declared_charset:
+        encodings.append(declared_charset)
+    encodings.extend(fallback_encodings)
+
+    decoded = ""
+    for encoding in encodings:
+        normalized = str(encoding or "").strip().lower()
+        if not normalized or normalized in tried:
+            continue
+        tried.add(normalized)
+        try:
+            decoded = data.decode(normalized)
+            break
+        except (LookupError, UnicodeDecodeError):
+            continue
+    else:
+        decoded = data.decode("utf-8", errors="replace")
+
+    if apply_mojibake_repair:
+        decoded = repair_mojibake_text(decoded)
+    return decoded
+
+
+def read_text_file_with_fallbacks(
+    path: Path,
+    *,
+    fallback_encodings: tuple[str, ...] = ("utf-8", "cp1252", "latin-1"),
+    apply_mojibake_repair: bool = False,
+) -> str:
+    return decode_text_bytes(
+        path.read_bytes(),
+        fallback_encodings=fallback_encodings,
+        apply_mojibake_repair=apply_mojibake_repair,
+    )

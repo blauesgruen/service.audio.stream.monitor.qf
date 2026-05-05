@@ -36,6 +36,7 @@ from .config import (
 )
 from .models import StationMatch
 from .utils import (
+    decode_text_bytes,
     get_base_domain,
     is_mixed_alnum_token,
     is_non_origin_directory_url,
@@ -723,13 +724,19 @@ class StationLookupService:
         payload = ""
         try:
             with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                payload = response.read(500000).decode("utf-8", errors="ignore")
+                payload = decode_text_bytes(
+                    response.read(500000),
+                    content_type=response.headers.get("Content-Type") or "",
+                )
         except Exception as err:
             if isinstance(getattr(err, "reason", None), ssl.SSLCertVerificationError):
                 context = ssl._create_unverified_context()
                 try:
                     with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS, context=context) as response:
-                        payload = response.read(500000).decode("utf-8", errors="ignore")
+                        payload = decode_text_bytes(
+                            response.read(500000),
+                            content_type=response.headers.get("Content-Type") or "",
+                        )
                 except Exception:
                     return ""
             else:
@@ -1441,14 +1448,14 @@ class StationLookupService:
         try:
             with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 payload = response.read(900000)
-                return payload.decode("utf-8", errors="ignore")
+                return decode_text_bytes(payload, content_type=response.headers.get("Content-Type") or "")
         except Exception as err:
             if isinstance(getattr(err, "reason", None), ssl.SSLCertVerificationError):
                 context = ssl._create_unverified_context()
                 try:
                     with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS, context=context) as response:
                         payload = response.read(900000)
-                        return payload.decode("utf-8", errors="ignore")
+                        return decode_text_bytes(payload, content_type=response.headers.get("Content-Type") or "")
                 except Exception:
                     return ""
             return ""

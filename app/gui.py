@@ -46,7 +46,7 @@ if __package__:
     from .source_policy import collect_origin_domains
     from .station_lookup import StationLookupError, StationLookupService
     from .stream_resolver import StreamResolveError, StreamResolver
-    from .utils import is_probable_url
+    from .utils import is_probable_url, read_text_file_with_fallbacks
 else:
     # Allow direct execution via `python app/gui.py`.
     project_root = Path(__file__).resolve().parent.parent
@@ -85,7 +85,7 @@ else:
     from app.source_policy import collect_origin_domains
     from app.station_lookup import StationLookupError, StationLookupService
     from app.stream_resolver import StreamResolveError, StreamResolver
-    from app.utils import is_probable_url
+    from app.utils import is_probable_url, read_text_file_with_fallbacks
 
 
 class RadioToolApp:
@@ -392,9 +392,9 @@ class RadioToolApp:
         stations: list[str] = []
         seen = set()
         try:
-            raw_text = Path(path).read_text(encoding="utf-8")
+            raw_text = read_text_file_with_fallbacks(Path(path))
         except Exception:
-            raw_text = Path(path).read_text(encoding="latin-1")
+            raw_text = ""
 
         for raw_line in raw_text.splitlines():
             line = raw_line.strip()
