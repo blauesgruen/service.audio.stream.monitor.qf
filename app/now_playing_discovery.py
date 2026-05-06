@@ -17,6 +17,8 @@ from urllib.request import Request, urlopen
 
 from .config import (
     DISCOVERY_CRAWL_MAX_WORKERS,
+    DISCOVERY_CTRL_API_FUTURE_GRACE_SECONDS,
+    DISCOVERY_CTRL_API_START_DELAY_SECONDS,
     DISCOVERY_OFFICIAL_PLAYER_ENTRY_LIMIT,
     DISCOVERY_OFFICIAL_PLAYER_FOLLOWUP_BUDGET,
     DISCOVERY_MAX_CANDIDATES,
@@ -394,6 +396,7 @@ class NowPlayingDiscoveryService:
 
         phase_started = time.perf_counter()
         normalized_candidates = self._dedupe_url_variants(candidates)
+        normalized_candidates = self._prefer_ctrl_api_timestamped_candidates(normalized_candidates)
         context_filtered_candidates = {
             url
             for url in normalized_candidates
@@ -401,6 +404,7 @@ class NowPlayingDiscoveryService:
         }
         if context_filtered_candidates:
             normalized_candidates = context_filtered_candidates
+            normalized_candidates = self._prefer_ctrl_api_timestamped_candidates(normalized_candidates)
         ranked = sorted(
             normalized_candidates,
             key=lambda url: self._candidate_score(url) + self._candidate_domain_preference(url, resolved, station),
@@ -1787,6 +1791,7 @@ class NowPlayingDiscoveryService:
             return None
 
         candidates = self._extract_iris_flow_candidates(data)
+        candidates.extend(self._extract_ctrl_api_playlist_candidates(data, source_url))
         candidates.extend(self._extract_radioplayer_event_candidates(data))
         candidates.extend(self._extract_graphql_stream_track_candidates(data))
         br_candidates = self._extract_br_radio_candidates(data)
@@ -1865,6 +1870,96 @@ class NowPlayingDiscoveryService:
             return None
 
         return self._build_song_from_scored_candidates(candidates, payload, source_url)
+
+    def _extract_ctrl_api_playlist_candidates(
+        self,
+        data: dict | list,
+        source_url: str,
+    ) -> list[tuple[int, str, str, str, str, int | None]]:
+        lower_url = str(source_url or "").strip().lower()
+        if "ctrl-api/getplaylist" not in lower_url:
+            return []
+        if not isinstance(data, dict):
+            return []
+
+        entries = data.get("data")
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            return []
+
+        timeline: list[tuple[float, str, str]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            title = self._extract_json_value(entry, TITLE_KEYS).strip()
+            artist = self._extract_artist_from_node(entry).strip()
+            if title and not artist:
+                split_artist, split_title = self._split_compound_title(title)
+                if split_artist and split_title:
+                    artist = split_artist
+                    title = split_title
+            if not title or not artist:
+                continue
+
+            ts_text = self._extract_json_value(entry, {"ts", "timestamp", "starttime", "start"}).strip()
+            started_at = self._parse_datetime(ts_text)
+            if not started_at:
+                continue
+            if started_at.tzinfo is None:
+                start_ts = started_at.timestamp()
+            else:
+                start_ts = started_at.astimezone(timezone.utc).timestamp()
+            timeline.append((start_ts, artist, title))
+
+        if not timeline:
+            return []
+
+        timeline.sort(key=lambda item: item[0])
+        now_ts = time.time()
+        future_grace = max(0.0, float(DISCOVERY_CTRL_API_FUTURE_GRACE_SECONDS))
+        start_delay = max(0.0, float(DISCOVERY_CTRL_API_START_DELAY_SECONDS))
+        effective_now_ts = now_ts - start_delay
+
+        active_idx = -1
+        for idx, (start_ts, _, _) in enumerate(timeline):
+            if start_ts <= effective_now_ts + future_grace:
+                active_idx = idx
+            else:
+                break
+        if active_idx < 0:
+            return []
+
+        start_ts, artist, title = timeline[active_idx]
+        next_start_ts = timeline[active_idx + 1][0] if active_idx + 1 < len(timeline) else 0.0
+        if next_start_ts and next_start_ts <= effective_now_ts:
+            return []
+
+        duration_text = ""
+        if next_start_ts > start_ts:
+            duration_seconds = int(next_start_ts - start_ts)
+            if 0 < duration_seconds <= 3 * 3600:
+                duration_text = str(duration_seconds)
+
+        time_text = str(int(start_ts))
+        age_minutes = self._age_minutes(time_text)
+        if age_minutes is not None and age_minutes > MAX_NOWPLAYING_AGE_MINUTES:
+            return []
+
+        score = 420
+        if next_start_ts and start_ts <= effective_now_ts < next_start_ts:
+            score += 220
+        elif next_start_ts and effective_now_ts < start_ts:
+            return []
+        elif next_start_ts and effective_now_ts >= next_start_ts:
+            score -= 180
+        if age_minutes is not None:
+            if age_minutes >= 0:
+                score += 20
+            else:
+                score -= 160
+
+        return [(score, artist, title, time_text, duration_text, age_minutes)]
 
     def _build_song_from_scored_candidates(
         self,
@@ -2495,6 +2590,64 @@ class NowPlayingDiscoveryService:
             deduped.add(best)
         return deduped
 
+    def _prefer_ctrl_api_timestamped_candidates(self, candidates: set[str]) -> set[str]:
+        timestamped_groups = set()
+        for url in candidates:
+            if not self._is_ctrl_api_playlist_candidate(url):
+                continue
+            signature = self._ctrl_api_candidate_signature(url)
+            if signature:
+                timestamped_groups.add(signature)
+
+        if not timestamped_groups:
+            return candidates
+
+        filtered = set()
+        suppressed_count = 0
+        for url in candidates:
+            if self._is_ctrl_api_snapshot_candidate(url):
+                signature = self._ctrl_api_candidate_signature(url)
+                if signature and signature in timestamped_groups:
+                    suppressed_count += 1
+                    continue
+            filtered.add(url)
+
+        if suppressed_count:
+            self._log(
+                "Ctrl-API Snapshot-Kandidaten verdrängt: "
+                f"{suppressed_count} (timestamped siblings={len(timestamped_groups)})"
+            )
+        return filtered
+
+    def _ctrl_api_candidate_signature(self, url: str) -> tuple[str, str] | None:
+        parsed = urlparse(str(url or "").strip())
+        host = (parsed.hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        path = parsed.path.lower()
+        if not host or "/ctrl-api/" not in path:
+            return None
+        if not (path.endswith("/getcurrentsong") or path.endswith("/getplaylist")):
+            return None
+
+        query_params = {key.lower(): value for key, value in parse_qsl(parsed.query, keep_blank_values=True)}
+        stream_key = ""
+        for key_name in ("k", "skey", "streamkey", "channelkey", "key"):
+            stream_key = str(query_params.get(key_name) or "").strip().lower()
+            if stream_key:
+                break
+        if not stream_key:
+            return None
+        return (host, stream_key)
+
+    def _is_ctrl_api_playlist_candidate(self, url: str) -> bool:
+        lower = str(url or "").strip().lower()
+        return "ctrl-api/getplaylist" in lower
+
+    def _is_ctrl_api_snapshot_candidate(self, url: str) -> bool:
+        lower = str(url or "").strip().lower()
+        return "ctrl-api/getcurrentsong" in lower
+
     def _url_variant_key(self, url: str) -> str:
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
@@ -2570,6 +2723,11 @@ class NowPlayingDiscoveryService:
             return True
         if self._is_bcs_current_candidate(url):
             return self._bcs_station_selector_matches_context(url, resolved, station)
+        if self._ctrl_api_candidate_signature(url):
+            # ctrl-api feeds are keyed provider APIs; they often live on a shared host
+            # without station-identifying path tokens, so domain/token overlap is not
+            # a reliable context signal here.
+            return True
         is_radiomodul = "radiomodul" in lower_url
         is_playlist_like = any(
             token in lower_url
@@ -2924,6 +3082,11 @@ class NowPlayingDiscoveryService:
                 if any(token in lower for token in ("currentsong", "getplaylist", "metadata/channel/", "nowplaying")):
                     api_bases.add(extracted)
 
+            for extracted in self._extract_embedded_feed_urls(text):
+                lower = extracted.lower()
+                if any(token in lower for token in ("currentsong", "getplaylist", "metadata/channel/", "nowplaying")):
+                    api_bases.add(extracted)
+
             for host_fragment in re.findall(
                 r"(?:https?://)?api\.streamabc\.net/metadata/channel/",
                 text,
@@ -2966,6 +3129,26 @@ class NowPlayingDiscoveryService:
                 generated.add(url)
 
         return generated
+
+    def _extract_embedded_feed_urls(self, text: str) -> set[str]:
+        if not text:
+            return set()
+
+        extracted = set()
+        for match in re.findall(
+            r"https?:\\\\?/\\\\?/[^\"'\s<>()]+",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            normalized = str(match or "").strip()
+            if not normalized:
+                continue
+            normalized = normalized.replace("\\/", "/")
+            normalized = normalized.replace("\\u0026", "&")
+            normalized = normalized.replace("&amp;", "&")
+            if is_probable_url(normalized):
+                extracted.add(normalized)
+        return extracted
 
     def _extract_channel_current_track_urls(self, urls: set[str]) -> set[str]:
         candidates = set()
