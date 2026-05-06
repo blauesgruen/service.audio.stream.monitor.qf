@@ -1599,7 +1599,21 @@ class NowPlayingDiscoveryService:
                 score += 10
         if "avcustom" in lower:
             score += 40
-        if "/xml/titellisten/" in path_query or "titellisten/xml-index.do" in path_query:
+        direct_titellisten_file = (
+            "/xml/titellisten/" in path
+            and "xml-index.do" not in path_query
+            and (path.endswith(".json") or path.endswith(".xml"))
+        )
+        if direct_titellisten_file:
+            # Prefer concrete playlist documents over provider index endpoints.
+            score += 55
+            if path.endswith(".json"):
+                score += 20
+            elif path.endswith(".xml"):
+                score += 10
+        elif "titellisten/xml-index.do" in path_query:
+            score += 15
+        elif "/xml/titellisten/" in path_query:
             score += 35
         if "playlist" in path_query or "titelliste" in path_query:
             score += 20
