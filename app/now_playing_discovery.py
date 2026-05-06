@@ -9,6 +9,7 @@ import ssl
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from urllib.error import URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
@@ -16,6 +17,8 @@ from urllib.request import Request, urlopen
 
 from .config import (
     DISCOVERY_CRAWL_MAX_WORKERS,
+    DISCOVERY_OFFICIAL_PLAYER_ENTRY_LIMIT,
+    DISCOVERY_OFFICIAL_PLAYER_FOLLOWUP_BUDGET,
     DISCOVERY_MAX_CANDIDATES,
     DISCOVERY_PAGE_FETCH_BUDGET,
     DISCOVERY_PLAYERBAR_MAX_CONTAINERS,
@@ -134,6 +137,13 @@ BCS_CURRENT_MODE_VALUE = "current_station"
 BCS_CURRENT_STATION_PARAM = "station"
 RADIOPLAYER_EVENT_TITLE_KEYS = {"name", "title", "song", "track"}
 RADIOPLAYER_EVENT_ARTIST_KEYS = {"artistname", "artist_name", "artist"}
+
+
+@dataclass
+class OfficialPlayerEntry:
+    score: int
+    feed_urls: list[str] = field(default_factory=list)
+    follow_urls: list[str] = field(default_factory=list)
 
 
 class NowPlayingDiscoveryService:
@@ -1589,6 +1599,8 @@ class NowPlayingDiscoveryService:
                 score += 10
         if "avcustom" in lower:
             score += 40
+        if "/xml/titellisten/" in path_query or "titellisten/xml-index.do" in path_query:
+            score += 35
         if "playlist" in path_query or "titelliste" in path_query:
             score += 20
         if "/webradio/playlist/" in path_query:
@@ -1705,7 +1717,11 @@ class NowPlayingDiscoveryService:
         )
 
     def _xml_status_score(self, elem: ET.Element) -> int:
-        status = (elem.attrib.get("status") or "").strip().lower()
+        status = ""
+        for attr_key, attr_value in elem.attrib.items():
+            if str(attr_key or "").strip().lower() == "status":
+                status = str(attr_value or "").strip().lower()
+                break
         if status in {"now", "current", "onair", "live"}:
             return 100
         if status in {"next", "upcoming"}:
@@ -3175,11 +3191,14 @@ class NowPlayingDiscoveryService:
         resolved: ResolvedStream,
         station: StationMatch | None,
     ) -> set[str]:
-        config_urls = self._extract_official_config_urls(documents)
+        config_urls = self._extract_official_player_config_urls(documents)
         if not config_urls:
             return set()
 
+        self._log(f"Official-Player-Konfigurationen gefunden: {len(config_urls)}")
         feeds = set()
+        followup_urls: list[str] = []
+        seen_followups = set()
         for config_url in sorted(config_urls):
             payload_text, content_type = self._fetch_text(config_url)
             if not payload_text:
@@ -3193,10 +3212,248 @@ class NowPlayingDiscoveryService:
             if not isinstance(payload, dict):
                 continue
 
-            for feed_url in self._extract_channel_feed_urls(payload, config_url, resolved, station):
+            for entry in self._extract_official_player_entries(payload, config_url, resolved, station):
+                for feed_url in entry.feed_urls:
+                    for variant_url in self._expand_feed_format_variants(feed_url):
+                        if is_probable_url(variant_url):
+                            feeds.add(variant_url)
+                for follow_url in entry.follow_urls:
+                    if not is_probable_url(follow_url):
+                        continue
+                    if follow_url in seen_followups:
+                        continue
+                    seen_followups.add(follow_url)
+                    followup_urls.append(follow_url)
+
+        if followup_urls:
+            budget = max(0, int(DISCOVERY_OFFICIAL_PLAYER_FOLLOWUP_BUDGET))
+            if budget > 0:
+                planned_followups = followup_urls[:budget]
+                self._log(f"Official-Player-Folgedokumente geplant: {len(planned_followups)}")
+                for doc_url, doc_text in self._fetch_documents_parallel(planned_followups):
+                    for extracted_url in self._extract_urls_from_document(doc_text, doc_url):
+                        if self._looks_like_feed_url(extracted_url):
+                            for variant_url in self._expand_feed_format_variants(extracted_url):
+                                feeds.add(variant_url)
+
+        if feeds:
+            self._log(f"Official-Player-Feeds gefunden: {len(feeds)}")
+
+        return feeds
+
+    def _extract_official_player_config_urls(self, documents: list[tuple[str, str, list[str]]]) -> set[str]:
+        config_urls = set(self._extract_official_config_urls(documents))
+        for doc_url, _, extracted_urls in documents:
+            for candidate_url in [doc_url, *extracted_urls]:
+                if self._looks_like_official_player_config_url(candidate_url):
+                    config_urls.add(candidate_url)
+        return config_urls
+
+    def _extract_official_player_entries(
+        self,
+        payload: dict,
+        config_url: str,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> list[OfficialPlayerEntry]:
+        station_name = (station.name if station else "") or resolved.station_name or ""
+        input_label = (resolved.input_url or "").strip()
+        parsed_config = urlparse(config_url)
+        config_base = f"{parsed_config.scheme}://{parsed_config.netloc}" if parsed_config.scheme and parsed_config.netloc else ""
+        scored_entries: list[OfficialPlayerEntry] = []
+
+        for schema_name, node in (
+            ("channels", payload.get("channels")),
+            ("streams", payload.get("streams")),
+        ):
+            items: list[dict] = []
+            if isinstance(node, dict):
+                items = [value for value in node.values() if isinstance(value, dict)]
+            elif isinstance(node, list):
+                items = [value for value in node if isinstance(value, dict)]
+            if not items:
+                continue
+
+            for item in items:
+                entry = self._build_official_player_entry(
+                    schema_name=schema_name,
+                    item=item,
+                    config_base=config_base,
+                    resolved=resolved,
+                    station_name=station_name,
+                    input_label=input_label,
+                )
+                if entry:
+                    scored_entries.append(entry)
+
+        if not scored_entries:
+            return []
+
+        scored_entries.sort(key=lambda entry: entry.score, reverse=True)
+        best_score = scored_entries[0].score
+        entry_limit = max(1, int(DISCOVERY_OFFICIAL_PLAYER_ENTRY_LIMIT))
+        return [entry for entry in scored_entries if entry.score == best_score][:entry_limit]
+
+    def _build_official_player_entry(
+        self,
+        schema_name: str,
+        item: dict,
+        config_base: str,
+        resolved: ResolvedStream,
+        station_name: str,
+        input_label: str,
+    ) -> OfficialPlayerEntry | None:
+        names = self._extract_official_player_entry_names(item)
+        feed_urls = self._extract_official_player_entry_urls(
+            item,
+            config_base,
+            (
+                {"currenturl", "current_url", "nowplayingurl", "now_playing_url", "feedurl", "feed_url"},
+                {"playlisturl", "playlist_url", "historyurl", "history_url"},
+            ),
+        )
+        follow_urls: list[str] = []
+        stream_url = ""
+
+        url_candidates = self._extract_official_player_entry_urls(
+            item,
+            config_base,
+            (
+                {"url", "pageurl", "page_url", "htmlurl", "html_url", "documenturl", "document_url"},
+                {"configurl", "config_url", "playerurl", "player_url"},
+                {"streamurl", "stream_url", "audiourl", "audio_url", "mount"},
+            ),
+        )
+        for candidate_url in url_candidates:
+            if self._looks_like_stream_endpoint(candidate_url):
+                if not stream_url:
+                    stream_url = candidate_url
+                continue
+            if candidate_url not in follow_urls:
+                follow_urls.append(candidate_url)
+
+        if schema_name == "channels" and not stream_url:
+            direct_stream = self._extract_json_value(item, {"url"})
+            direct_stream = self._absolutize_official_player_url(direct_stream, config_base)
+            if direct_stream and self._looks_like_stream_endpoint(direct_stream):
+                stream_url = direct_stream
+
+        score = 0
+        if feed_urls:
+            score += 40
+        if follow_urls:
+            score += 15
+        if stream_url and self._stream_url_matches(stream_url, resolved.resolved_url):
+            score += 120
+        if stream_url and resolved.delivery_url and self._stream_url_matches(stream_url, resolved.delivery_url):
+            score += 40
+        if any(self._station_name_matches(name, station_name) for name in names if name and station_name):
+            score += 90
+        if any(self._station_name_matches(name, input_label) for name in names if name and input_label):
+            score += 70
+
+        if score <= 0:
+            return None
+        return OfficialPlayerEntry(score=score, feed_urls=feed_urls, follow_urls=follow_urls)
+
+    def _extract_official_player_entry_names(self, item: dict) -> list[str]:
+        names: list[str] = []
+        seen = set()
+        for keyset in (
+            {"title", "label", "channel", "stationname"},
+            {"id", "slug", "name"},
+        ):
+            value = self._extract_json_value(item, keyset)
+            if not value:
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            names.append(value)
+        return names
+
+    def _extract_official_player_entry_urls(
+        self,
+        item: dict,
+        config_base: str,
+        keysets: tuple[set[str], ...],
+    ) -> list[str]:
+        urls: list[str] = []
+        seen = set()
+        for keyset in keysets:
+            value = self._extract_json_value(item, keyset)
+            absolute = self._absolutize_official_player_url(value, config_base)
+            if not absolute:
+                continue
+            if absolute in seen:
+                continue
+            seen.add(absolute)
+            urls.append(absolute)
+        return urls
+
+    def _absolutize_official_player_url(self, value: str, config_base: str) -> str:
+        if not value:
+            return ""
+        if is_probable_url(value):
+            return value
+        if not config_base:
+            return ""
+        absolute = urljoin(config_base, value)
+        if not is_probable_url(absolute):
+            return ""
+        return absolute
+
+    def _expand_feed_format_variants(self, url: str) -> list[str]:
+        normalized = str(url or "").strip()
+        if not normalized:
+            return []
+
+        variants: list[str] = []
+        seen = set()
+
+        def _remember(candidate: str) -> None:
+            candidate = str(candidate or "").strip()
+            if not candidate or candidate in seen:
+                return
+            if not is_probable_url(candidate):
+                return
+            seen.add(candidate)
+            variants.append(candidate)
+
+        _remember(normalized)
+        parsed = urlparse(normalized)
+        path = parsed.path
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        lower_path = path.lower()
+
+        if "avcustom" not in lower_path:
+            if lower_path.endswith(".xml"):
+                _remember(urlunparse(parsed._replace(path=re.sub(r"\.xml$", ".json", path, flags=re.IGNORECASE))))
+            elif lower_path.endswith(".json"):
+                _remember(urlunparse(parsed._replace(path=re.sub(r"\.json$", ".xml", path, flags=re.IGNORECASE))))
+
+        output_value = str(query.get("output") or "").strip().lower()
+        if output_value == "xml":
+            query["output"] = "json"
+            _remember(urlunparse(parsed._replace(query=urlencode(query, doseq=True))))
+        elif output_value == "json":
+            query["output"] = "xml"
+            _remember(urlunparse(parsed._replace(query=urlencode(query, doseq=True))))
+
+        return variants
+
+    def _extract_channel_feed_urls(
+        self,
+        payload: dict,
+        config_url: str,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> set[str]:
+        feeds = set()
+        for entry in self._extract_official_player_entries(payload, config_url, resolved, station):
+            for feed_url in entry.feed_urls:
                 if is_probable_url(feed_url):
                     feeds.add(feed_url)
-
         return feeds
 
     def _discover_playerbar_playlist_urls(
@@ -3338,6 +3595,23 @@ class NowPlayingDiscoveryService:
                     config_urls.add(f"{scheme}://{netloc}/webradio/{mandate}/config.json")
 
         return config_urls
+
+    def _looks_like_official_player_config_url(self, url: str) -> bool:
+        parsed = urlparse(str(url or "").strip())
+        path = parsed.path.lower()
+        if not parsed.scheme or not parsed.netloc:
+            return False
+        if not path.endswith(".json"):
+            return False
+        if "config" not in path:
+            return False
+        if "/webradio/" in path:
+            return True
+        if "/radiolivestreams/" in path:
+            return True
+        if any(token in path for token in ("livestream", "stream", "radio")):
+            return True
+        return False
 
     def _looks_like_playerbar_container_url(self, url: str) -> bool:
         parsed = urlparse(str(url or "").strip())

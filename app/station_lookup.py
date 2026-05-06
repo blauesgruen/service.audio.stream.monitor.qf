@@ -21,6 +21,7 @@ from .config import (
     STATION_LOOKUP_IGNORED_TOKENS,
     STATION_LOOKUP_MAX_QUERY_VARIANTS,
     STATION_LOOKUP_OPTIONAL_PREFIX_TOKENS,
+    STATION_LOOKUP_OPTIONAL_SUFFIX_TOKENS,
     STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS,
     STATION_LOOKUP_SEARCH_MIN_TOKEN_LENGTH,
     STATION_LOOKUP_SIGNIFICANT_SHORT_TOKENS,
@@ -1028,6 +1029,9 @@ class StationLookupService:
         if not missing:
             return True
 
+        if self._has_optional_trailing_region_suffix(query_tokens_with_pos, missing, station_tokens):
+            return True
+
         missing_alpha = [token for token, _ in missing if not token.isdigit()]
         if not missing_alpha:
             query_alpha_tokens = [token for token, _ in query_tokens_with_pos if not token.isdigit()]
@@ -1048,6 +1052,29 @@ class StationLookupService:
         if self._has_strong_name_equivalence(station.name or "", query):
             return True
         return False
+
+    def _has_optional_trailing_region_suffix(
+        self,
+        query_tokens_with_pos: list[tuple[str, int]],
+        missing: list[tuple[str, int]],
+        station_tokens: set[str],
+    ) -> bool:
+        missing_alpha = [token for token, _ in missing if not token.isdigit()]
+        if not missing_alpha:
+            return False
+        if any(token not in STATION_LOOKUP_OPTIONAL_SUFFIX_TOKENS for token in missing_alpha):
+            return False
+
+        trailing_missing = query_tokens_with_pos[-len(missing) :]
+        if trailing_missing != missing:
+            return False
+
+        overlap_alpha = {
+            token
+            for token, _ in query_tokens_with_pos[:-len(missing)]
+            if not token.isdigit() and token in station_tokens
+        }
+        return len(overlap_alpha) >= STATION_LOOKUP_STRICT_MIN_QUERY_TOKENS
 
     def _compact_compare_key(self, value: str) -> str:
         text = (value or "").strip().lower()
@@ -1232,9 +1259,15 @@ class StationLookupService:
             return []
 
         groups = [tokens]
+        stripped_suffix = self._strip_optional_trailing_tokens(tokens)
+        if stripped_suffix and stripped_suffix != tokens:
+            groups.append(stripped_suffix)
         stripped = [token for token in tokens if token.lower() not in STATION_LOOKUP_IGNORED_TOKENS]
         if stripped and stripped != tokens:
             groups.append(stripped)
+            stripped_suffix = self._strip_optional_trailing_tokens(stripped)
+            if stripped_suffix and stripped_suffix != stripped:
+                groups.append(stripped_suffix)
 
         mapped_groups = []
         for group in groups:
@@ -1252,6 +1285,18 @@ class StationLookupService:
             seen.add(key)
             deduped.append(group)
         return deduped
+
+    def _strip_optional_trailing_tokens(self, tokens: list[str]) -> list[str]:
+        if len(tokens) <= STATION_LOOKUP_MIN_TOKENS_PER_VARIANT:
+            return tokens
+
+        end = len(tokens)
+        while end > STATION_LOOKUP_MIN_TOKENS_PER_VARIANT:
+            token = tokens[end - 1].lower()
+            if token not in STATION_LOOKUP_OPTIONAL_SUFFIX_TOKENS:
+                break
+            end -= 1
+        return tokens[:end]
 
     def _build_token_variants(self, tokens: list[str], min_tokens: int, max_variants: int) -> list[list[str]]:
         if not tokens:
