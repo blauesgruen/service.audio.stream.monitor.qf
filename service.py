@@ -126,6 +126,7 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_VERIFIED_SOURCE_STREAM_CONFIRM_HITS = 2
         self.QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS = 180.0
         self.QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT = True
+        self.QF_VERIFIED_SOURCE_SNAPSHOT_KEEPALIVE_ONLY = True
         self.QF_PHASE_TIMING_PRECISION = 3
         self.QF_RESULT_CACHE_ENABLED = True
         self.QF_RESULT_CACHE_TTL_SECONDS = 12
@@ -236,6 +237,7 @@ class QFBridgeService(xbmc.Monitor):
                 QF_VERIFIED_SOURCE_STREAM_CONFIRM_HITS,
                 QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS,
                 QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT,
+                QF_VERIFIED_SOURCE_SNAPSHOT_KEEPALIVE_ONLY,
             )
             from app.metadata import SongMetadataFetcher
             from app.now_playing_discovery import NowPlayingDiscoveryService
@@ -308,6 +310,7 @@ class QFBridgeService(xbmc.Monitor):
             10.0, float(QF_VERIFIED_SOURCE_STREAM_CONFIRM_WINDOW_SECONDS)
         )
         self.QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT = bool(QF_VERIFIED_SOURCE_STREAM_SKIP_IF_FEED_PRESENT)
+        self.QF_VERIFIED_SOURCE_SNAPSHOT_KEEPALIVE_ONLY = bool(QF_VERIFIED_SOURCE_SNAPSHOT_KEEPALIVE_ONLY)
         self.QF_PHASE_TIMING_PRECISION = max(1, int(QF_PHASE_TIMING_PRECISION))
         self.QF_RESULT_CACHE_ENABLED = bool(QF_RESULT_CACHE_ENABLED)
         self.QF_RESULT_CACHE_TTL_SECONDS = max(0, int(QF_RESULT_CACHE_TTL_SECONDS))
@@ -649,6 +652,39 @@ class QFBridgeService(xbmc.Monitor):
             return "feed"
         return "stream"
 
+    def _get_verified_source_fastpath_profile(self, source_url, meta=None):
+        url = str(source_url or "").strip().lower()
+        meta_obj = meta if isinstance(meta, dict) else {}
+        profile = {
+            "provider_family": "",
+            "feed_semantics": "default",
+            "keepalive_only": False,
+        }
+        if "/ctrl-api/" in url:
+            profile["provider_family"] = "ctrl_api"
+            if "/getcurrentsong" in url:
+                profile["feed_semantics"] = "snapshot"
+                profile["keepalive_only"] = bool(self.QF_VERIFIED_SOURCE_SNAPSHOT_KEEPALIVE_ONLY)
+            elif "/getplaylist" in url:
+                profile["feed_semantics"] = "timestamped"
+        meta_profile = str(meta_obj.get("verified_fastpath_profile") or "").strip().lower()
+        if meta_profile == "snapshot":
+            profile["feed_semantics"] = "snapshot"
+            profile["keepalive_only"] = bool(self.QF_VERIFIED_SOURCE_SNAPSHOT_KEEPALIVE_ONLY)
+        elif meta_profile == "timestamped":
+            profile["feed_semantics"] = "timestamped"
+        return profile
+
+    @staticmethod
+    def _result_pair_tuple(result_obj):
+        result = result_obj if isinstance(result_obj, dict) else {}
+        artist = str(result.get("artist") or "").strip().lower()
+        title = str(result.get("title") or "").strip().lower()
+        return artist, title
+
+    def _is_verified_force_resolve_state(self, fastpath_state):
+        return str(fastpath_state or "").strip().lower().startswith("resolve_")
+
     def _probe_verified_source_fastpath(
         self,
         *,
@@ -751,6 +787,10 @@ class QFBridgeService(xbmc.Monitor):
             verified_source_url,
             meta=candidate_meta,
         )
+        fastpath_profile = self._get_verified_source_fastpath_profile(
+            verified_source_url,
+            meta=candidate_meta,
+        )
         candidate_confidence = float(candidate.get("confidence") or 0.0) if isinstance(candidate, dict) else 0.0
         if candidate_kind == "stream":
             if candidate_confidence < float(self.QF_VERIFIED_SOURCE_STREAM_FASTPATH_MIN_CONFIDENCE):
@@ -781,6 +821,14 @@ class QFBridgeService(xbmc.Monitor):
             return None, f"probe_{candidate_kind}_error"
 
         if not fast_song:
+            if candidate_kind == "feed" and fastpath_profile.get("feed_semantics") == "snapshot":
+                self.logger.debug(
+                    "verified_source_fastpath_snapshot_fallback",
+                    station_key=key,
+                    source_url=verified_source_url,
+                    reason=probe_state,
+                )
+                return None, f"snapshot_{probe_state}"
             return None, f"probe_{candidate_kind}_{probe_state}"
 
         candidate_station_name = str(candidate.get("station_name") or "").strip()
@@ -790,6 +838,33 @@ class QFBridgeService(xbmc.Monitor):
             candidate_station_name = str(candidate_meta.get("station_input") or "").strip()
         if not candidate_station_name:
             candidate_station_name = station_name_hint
+
+        cached_result = self._get_cached_result(key)
+        if candidate_kind == "feed" and fastpath_profile.get("keepalive_only"):
+            cached_pair = self._result_pair_tuple(cached_result)
+            fresh_pair = (str(fast_song.artist or "").strip().lower(), str(fast_song.title or "").strip().lower())
+            if not cached_pair[0] or not cached_pair[1]:
+                self.logger.debug(
+                    "verified_source_fastpath_snapshot_resolve",
+                    station_key=key,
+                    source_url=verified_source_url,
+                    reason="no_cached_pair",
+                    artist=fast_song.artist,
+                    title=fast_song.title,
+                )
+                return None, "resolve_snapshot_no_cached_pair"
+            if cached_pair != fresh_pair:
+                self.logger.debug(
+                    "verified_source_fastpath_snapshot_resolve",
+                    station_key=key,
+                    source_url=verified_source_url,
+                    reason="pair_changed",
+                    cached_artist=cached_result.get("artist") or "",
+                    cached_title=cached_result.get("title") or "",
+                    fresh_artist=fast_song.artist,
+                    fresh_title=fast_song.title,
+                )
+                return None, "resolve_snapshot_pair_changed"
 
         return {
             "status": "hit",
@@ -804,6 +879,8 @@ class QFBridgeService(xbmc.Monitor):
                 "resolved_url": "",
                 "delivery_url": "",
                 "verified_source_kind": candidate_kind,
+                "verified_fastpath_provider_family": fastpath_profile.get("provider_family") or "",
+                "verified_fastpath_profile": fastpath_profile.get("feed_semantics") or "default",
             },
         }, f"hit_{candidate_kind}"
 
@@ -1890,6 +1967,7 @@ class QFBridgeService(xbmc.Monitor):
             )
             cached_result = self._get_cached_result(station_key)
             fastpath_probe_state = self._is_verified_probe_state(fastpath_state)
+            fastpath_force_resolve = self._is_verified_force_resolve_state(fastpath_state)
             allow_result_cache = True
             if (
                 fastpath_probe_state
@@ -1899,6 +1977,14 @@ class QFBridgeService(xbmc.Monitor):
                 if cached_result:
                     self.logger.debug(
                         "result_cache_bypassed_verified_probe_state",
+                        station_key=station_key,
+                        verified_fastpath_state=fastpath_state,
+                    )
+            if fastpath_force_resolve:
+                allow_result_cache = False
+                if cached_result:
+                    self.logger.debug(
+                        "result_cache_bypassed_verified_resolve_state",
                         station_key=station_key,
                         verified_fastpath_state=fastpath_state,
                     )
