@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import time
 import traceback
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import xbmc
 import xbmcaddon
@@ -675,6 +676,52 @@ class QFBridgeService(xbmc.Monitor):
             profile["feed_semantics"] = "timestamped"
         return profile
 
+    def _expand_verified_source_feed_urls_for_fastpath(self, source_url, fastpath_profile=None):
+        normalized = str(source_url or "").strip()
+        if not normalized:
+            return []
+
+        profile = fastpath_profile if isinstance(fastpath_profile, dict) else {}
+        if (
+            str(profile.get("provider_family") or "").strip().lower() != "ctrl_api"
+            or str(profile.get("feed_semantics") or "").strip().lower() != "timestamped"
+        ):
+            return [normalized]
+
+        parsed = urlparse(normalized)
+        lower_path = parsed.path.lower()
+        if "/ctrl-api/" not in lower_path or not lower_path.endswith("/getplaylist"):
+            return [normalized]
+
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if str(query.get("typ") or "").strip().lower() != "hour":
+            return [normalized]
+
+        base_query = dict(query)
+        base_query.pop("typ", None)
+        base_query.pop("ts", None)
+        bucket_now = int(time.time() // 3600) * 3600
+        bucket_prev = bucket_now - 3600
+
+        variants = []
+        seen = set()
+
+        def _remember(candidate_url):
+            candidate = str(candidate_url or "").strip()
+            if not candidate or candidate in seen:
+                return
+            seen.add(candidate)
+            variants.append(candidate)
+
+        for bucket in (bucket_now, bucket_prev):
+            playlist_query = dict(base_query)
+            playlist_query["typ"] = "hour"
+            playlist_query["ts"] = str(bucket)
+            _remember(urlunparse(parsed._replace(query=urlencode(playlist_query, doseq=True))))
+
+        _remember(normalized)
+        return variants
+
     @staticmethod
     def _result_pair_tuple(result_obj):
         result = result_obj if isinstance(result_obj, dict) else {}
@@ -690,6 +737,7 @@ class QFBridgeService(xbmc.Monitor):
         *,
         source_url,
         source_kind,
+        fastpath_profile,
         station_name_hint,
         station_id_value,
         station_id_norm,
@@ -699,10 +747,14 @@ class QFBridgeService(xbmc.Monitor):
         if source_kind == "feed":
             if not self.QF_VERIFIED_SOURCE_FEED_FASTPATH_ENABLED:
                 return None, "feed_disabled"
+            probe_urls = self._expand_verified_source_feed_urls_for_fastpath(
+                source_url,
+                fastpath_profile=fastpath_profile,
+            )
             song = discovery.fetch_now_playing(
-                [source_url],
+                probe_urls or [source_url],
                 station_name=station_name_hint,
-                max_candidates=1,
+                max_candidates=max(1, len(probe_urls or [source_url])),
                 max_elapsed_seconds=self.QF_VERIFIED_SOURCE_FEED_FASTPATH_MAX_SECONDS,
             )
             if not song:
@@ -804,6 +856,7 @@ class QFBridgeService(xbmc.Monitor):
             fast_song, probe_state = self._probe_verified_source_fastpath(
                 source_url=verified_source_url,
                 source_kind=candidate_kind,
+                fastpath_profile=fastpath_profile,
                 station_name_hint=station_name_hint,
                 station_id_value=station_id_value,
                 station_id_norm=station_id_norm,
