@@ -83,6 +83,7 @@ TIME_KEYS = {
     "starttime",
     "start",
     "timestamp",
+    "ts",
     "time",
     "date",
     "datetime",
@@ -1585,6 +1586,7 @@ class NowPlayingDiscoveryService:
         path_query = f"{parsed.path.lower()}?{parsed.query.lower()}"
         path = parsed.path.lower()
         query = parsed.query.lower()
+        query_params = {key.lower(): value for key, value in parse_qsl(parsed.query, keep_blank_values=True)}
         score = 0
         if host == "brradio.br.de" and path == "/radio/v4":
             score += 140
@@ -1643,6 +1645,26 @@ class NowPlayingDiscoveryService:
             score -= 20
         if "ctrl-api" in path_query:
             score += 25
+        if "ctrl-api/getplaylist" in path_query:
+            score += 55
+            if "typ=hour" in query:
+                score += 20
+            if "ts=" in query:
+                score += 15
+            ts_value = str(query_params.get("ts") or "").strip()
+            if ts_value.isdigit():
+                bucket = int(ts_value)
+                current_bucket = int(time.time() // 3600) * 3600
+                if bucket == current_bucket:
+                    score += 35
+                elif bucket == current_bucket - 3600:
+                    score += 10
+                elif bucket > current_bucket:
+                    score -= 120
+                else:
+                    score -= 40
+        elif "ctrl-api/getcurrentsong" in path_query:
+            score += 10
         if "metadata/channel/" in path_query:
             score += 30
         if "status-json.xsl" in path_query:
@@ -2924,10 +2946,12 @@ class NowPlayingDiscoveryService:
             if stream_keys:
                 for key in stream_keys[:1]:
                     for generated_url in self._inject_stream_key(cleaned_base, key):
-                        if self._looks_like_feed_url(generated_url):
-                            generated.add(generated_url)
+                        for variant_url in self._expand_ctrl_api_feed_variants(generated_url):
+                            if self._looks_like_feed_url(variant_url):
+                                generated.add(variant_url)
             elif self._looks_like_feed_url(cleaned_base):
-                generated.add(cleaned_base)
+                for variant_url in self._expand_ctrl_api_feed_variants(cleaned_base):
+                    generated.add(variant_url)
 
         channel_sources = set(known_candidates)
         for doc_url, text, extracted_urls in documents:
@@ -3948,6 +3972,51 @@ class NowPlayingDiscoveryService:
             candidates.add(urlunparse(parsed._replace(query=urlencode(query, doseq=True))))
 
         return candidates
+
+    def _expand_ctrl_api_feed_variants(self, url: str) -> list[str]:
+        normalized = str(url or "").strip()
+        if not normalized:
+            return []
+
+        variants: list[str] = []
+        seen = set()
+
+        def _remember(candidate: str) -> None:
+            candidate = str(candidate or "").strip()
+            if not candidate or candidate in seen:
+                return
+            seen.add(candidate)
+            variants.append(candidate)
+
+        _remember(normalized)
+        parsed = urlparse(normalized)
+        lower_path = parsed.path.lower()
+        if "/ctrl-api/" not in lower_path:
+            return variants
+
+        if not (
+            lower_path.endswith("/getcurrentsong")
+            or lower_path.endswith("/getplaylist")
+        ):
+            return variants
+
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        base_query = dict(query)
+        base_query.pop("typ", None)
+        base_query.pop("ts", None)
+
+        bucket_now = int(time.time() // 3600) * 3600
+        bucket_prev = bucket_now - 3600
+        playlist_path = re.sub(r"/getcurrentsong$", "/getPlaylist", parsed.path, flags=re.IGNORECASE)
+        playlist_path = re.sub(r"/getplaylist$", "/getPlaylist", playlist_path, flags=re.IGNORECASE)
+
+        for bucket in (bucket_now, bucket_prev):
+            playlist_query = dict(base_query)
+            playlist_query["typ"] = "hour"
+            playlist_query["ts"] = str(bucket)
+            _remember(urlunparse(parsed._replace(path=playlist_path, query=urlencode(playlist_query, doseq=True))))
+
+        return variants
 
     def _stream_url_matches(self, candidate_url: str, resolved_url: str) -> bool:
         a = urlparse(self._normalize_seed(candidate_url))
