@@ -6,9 +6,14 @@
   </requires>
   <extension point="xbmc.service" library="service.py" start="login" />
   <extension point="xbmc.addon.metadata">
+    <assets>
+      <icon>icon.png</icon>
+    </assets>
     <platform>all</platform>
     <license>MIT</license>
     <language>de</language>
+    <forum>https://www.kodinerds.net/thread/80927-wip-asm-quellenfinder/</forum>
+    <source>https://github.com/blauesgruen/service.audio.stream.monitor.qf</source>
     <summary lang="de_DE">Ergänzt Audio Stream Monitor um bessere Songinfos aus Internetquellen.</summary>
     <summary lang="en_GB">Adds better song information from internet sources to Audio Stream Monitor.</summary>
     <description lang="de_DE">ASM-QF ist eine Erweiterung für Audio Stream Monitor (ASM). Das Add-on sucht im Internet die Senderquelle und holt von dort aktuelle Songdaten. Es arbeitet mit einem Sendergedächtnis, das über die Zeit ausgebaut wird und Eigenarten pro Sender berücksichtigt. Nutze ASM-QF, wenn dein Sender trotz ASM unzureichende Songinfos liefert. Bisher wurde ASM-QF hauptsächlich mit deutschen Radiosendern getestet. ASM-QF muss in den ASM-Einstellungen aktiviert werden.</description>
