@@ -10,7 +10,7 @@
     <language>de</language>
     <summary lang="de_DE">Ergänzt Audio Stream Monitor um bessere Songinfos aus Internetquellen.</summary>
     <summary lang="en_GB">Adds better song information from internet sources to Audio Stream Monitor.</summary>
-    <description lang="de_DE">ASM-QF ist eine Erweiterung für Audio Stream Monitor (ASM). Das Addon sucht im Internet die Senderquelle und holt von dort aktuelle Songdaten. Es arbeitet mit einem Sendergedächtnis, das über die Zeit ausgebaut wird und Eigenarten pro Sender berücksichtigt. Nutze ASM-QF, wenn dein Sender trotz ASM unzureichende Songinfos liefert. Bisher wurde ASM-QF hauptsächlich mit deutschen Radiosendern getestet. ASM-QF muss in den ASM-Einstellungen aktiviert werden.</description>
+    <description lang="de_DE">ASM-QF ist eine Erweiterung für Audio Stream Monitor (ASM). Das Add-on sucht im Internet die Senderquelle und holt von dort aktuelle Songdaten. Es arbeitet mit einem Sendergedächtnis, das über die Zeit ausgebaut wird und Eigenarten pro Sender berücksichtigt. Nutze ASM-QF, wenn dein Sender trotz ASM unzureichende Songinfos liefert. Bisher wurde ASM-QF hauptsächlich mit deutschen Radiosendern getestet. ASM-QF muss in den ASM-Einstellungen aktiviert werden.</description>
     <description lang="en_GB">ASM-QF is an extension for Audio Stream Monitor (ASM). It searches the internet for a station's source and pulls current song data from there. It uses station memory that grows over time and adapts to each station's quirks. Use ASM-QF when your station still provides insufficient song info even with ASM. So far, ASM-QF has primarily been tested with German radio stations. ASM-QF must be enabled in ASM settings.</description>
   </extension>
 </addon>
