@@ -21,7 +21,7 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
 - `app/metadata.py`
   - Stream-ICY -> SongInfo, inkl. zentraler Metadaten-Normalisierung
 - `app/now_playing_discovery.py`
-  - Web-Discovery + XML/JSON/JSONP/HTML/GraphQL Parsing -> SongInfo
+  - Web-Discovery + XML/JSON/JSONP/HTML/GraphQL Parsing sowie providerstrukturierte Feed-Ableitung -> SongInfo
 - `app/station_identity.py`
   - gemeinsame Stations-Normalisierung, Lookup-Varianten, Name-First- und Station-ID-Fallback-Helfer sowie `station_key`-Hilfen
 - `app/source_policy.py`
@@ -166,11 +166,13 @@ Wichtig:
 - JSON-Kandidaten werden nicht nur nach `artist/title`, sondern auch nach aktivem Zeitfenster und Zustandsfeldern wie `playingMode` gescored
 - JSONP-Payloads werden zentral entpackt; offizielle GraphQL-Track-Feeds werden ueber einen spezialisierten Zeitfenster-Pfad bewertet
 - providerweite BCS-Player koennen aus offiziellen `webradio`-/`iframe`-Seiten ein strukturiertes Paar aus `jsonUrl` + `station` ableiten; der gemeinsame JSON-Feed wird danach gezielt auf den passenden Unterkanal reduziert
+- Loverad-/Audalaxy-Frontends koennen aus offiziellen Stream-Katalogen oder eingebetteten Bootstrap-Daten ein strukturiertes Paar aus `station_id` + `iris-host` ableiten; der gemeinsame `flow.json`-Feed wird danach gezielt nur fuer den gematchten Unterkanal erzeugt
 - HTTP-Transport mit Best-Effort-Fallback (`https` -> unverified SSL bei Cert-Fehler -> optional `http`)
 - `trusted` markiert Discovery-Quellen aus offizieller Player-Kette; nur mit `ALLOW_OFFICIAL_CHAIN_SOURCES=True` zusaetzlich erlaubt
 - zusaetzliche generische Player-Config-Extraktion (`data-mandate` + `webradio.js` -> `config.json` -> `currentUrl`/`playlistUrl`)
 - zusaetzliche schmale Playerbar-Extraktion: offizielle `playerbarContainer.json`-Dokumente werden nur bei echtem Stream-Match verfolgt und liefern dann ihre `playlist.feedUrl` als Kandidat
 - offizielle Frontends koennen zusaetzlich generische GraphQL-Track-Kandidaten liefern; die Auswahl des aktiven Tracks bleibt dabei in den zentralen Zeitfenster-Helfern, faellt bei fehlendem aktivem Eintrag aber bewusst nicht auf den generischen JSON-Walk zurueck
+- providerbezogene Hosts, Regexe und Ableitungsparameter bleiben als zentrale Konstanten in `app/config.py` bzw. im Kopf von `app/now_playing_discovery.py`; die eigentliche Senderzuordnung bleibt im gemeinsamen Match-Kern (`_stream_url_matches`, `_station_name_matches`)
 
 ### Shared-Kernmodule (`app/`)
 
@@ -482,6 +484,7 @@ Manueller Funktionstest:
 
 - Kein station-spezifischer Hardcode.
 - Neue Grenzwerte nur in `config.py`.
+- Provider-Sonderfaelle nur als kleine Discovery-Adapter mit zentralen Konstanten und generischem Sender-Matching einbauen.
 - Modullogik in Modul lassen, GUI nur orchestrieren.
 - Fehlermeldungen fuer User knapp, technische Details ins Live-Log.
 

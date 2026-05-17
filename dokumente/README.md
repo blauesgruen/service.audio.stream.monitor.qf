@@ -4,6 +4,7 @@ Diese Dokumentation beschreibt das Tool vollstaendig aus Anwendersicht und aus t
 
 ## Inhalt
 
+0. [Changelog](../CHANGELOG.md)
 1. [Produktuebersicht](./01_Produktuebersicht.md)
 2. [Bedienung der GUI](./02_Bedienung_GUI.md)
 3. [Architektur und Datenfluss](./03_Architektur_Datenfluss.md)

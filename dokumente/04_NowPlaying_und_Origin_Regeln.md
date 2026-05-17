@@ -49,6 +49,7 @@ Zusatzlogik:
 - offizielle `playerbarContainer.json`-Dokumente koennen zusaetzlich bis zur referenzierten `playlist.feedUrl` verfolgt werden, wenn ihr eingebetteter Audiostream zum aufgeloesten Sender passt
 - offizielle Frontends koennen zusaetzlich generische GraphQL-Track-Endpunkte liefern; diese werden nur als `trusted`-Kandidaten aus offizieller Player-Kette uebernommen
 - providerweite BCS-Player koennen aus offiziellen `webradio`-/`iframe`-Seiten ein Paar aus `jsonUrl` + `station` liefern; daraus entsteht ein strukturierter Kandidat fuer genau den passenden Unterkanal
+- Loverad-/Audalaxy-Frontends koennen aus offiziellen Stream-Katalogen oder eingebetteten Bootstrap-Daten ein Paar aus `station_id` + `iris-host` liefern; daraus entsteht ein strukturierter `flow.json`-Kandidat fuer genau den passenden Unterkanal
 - Audio-/Video-Content wird als Discovery-Text verworfen
 - redaktionelle HTML-Seiten mit Podcast-/Artikel-Charakter ohne echte Now-Playing-Struktur werden nicht mehr als direkte HTML-Feed-Kandidaten bevorzugt
 
@@ -95,6 +96,30 @@ Anschliessend werden Kandidat-URLs mit injizierten Key-Parametern erzeugt, z. B.
 - `...getPlaylist?skey=<key>`
 - `.../metadata/channel/<key>.json`
 
+## Providerstrukturierte Kataloge
+
+Einige offizielle Player liefern den aktuellen Song nicht direkt als frei verlinkten Feed, sondern ueber einen
+eingebetteten Stream-Katalog plus separaten Live-Endpunkt.
+
+Generischer Ablauf:
+
+1. offizielles Dokument oder Script finden
+2. strukturierte Eintraege extrahieren, z. B.:
+   - `station_id`
+   - `stream_url`
+   - `channel_name`
+   - provider-spezifischer Host-/Mandate-Hinweis
+3. den besten Eintrag gegen `resolved_url` und `delivery_url` matchen
+4. nur aus diesem Match den Live-Feed ableiten
+
+Beispiel Loverad/Audalaxy:
+
+- offizieller Katalog enthaelt `station_id` und `url_high`/`url_low`
+- Discovery matcht den Katalogeintrag zuerst gegen den bereits aufgeloesten Stream
+- daraus wird `https://iris-<mandate>.loverad.io/flow.json?station=<station_id>&offset=1&count=1`
+
+Dadurch bleibt die Discovery sender-unspezifisch und nutzt trotzdem offizielle providernahe Live-Feeds.
+
 ## Source-Policy
 
 ### 1) Origin-only
@@ -130,6 +155,7 @@ Weiterhin ausgeschlossen:
 - JSONP-Wrapper wie `callback(...)` werden vor dem JSON-Parse generisch entpackt
 - offizielle GraphQL-Track-Feeds werden nach demselben Prinzip in normale Song-Kandidaten ueberfuehrt; auch dort entscheidet die zentrale Zeitfensterlogik ueber `now`, `expired` oder `future`
 - bei providerweiten BCS-Feeds wird vor dem eigentlichen Song-Parse zunaechst der passende Kanal ueber den offiziellen `station`-Selektor ausgewaehlt; erst danach greifen die normalen JSON-Feldheuristiken
+- bei Loverad-`flow.json`-Feeds erfolgt die Senderzuordnung bereits vor dem Probe-Schritt ueber den offiziellen Stream-Katalog; der eigentliche JSON-Parse bleibt danach generisch
 - bei synthetischen GraphQL-Track-Kandidaten wird bewusst kein generischer JSON-Fallback mehr benutzt, wenn die spezialisierte Tracklisten-Auswertung keinen aktiven Eintrag findet; dadurch werden alte Titel aus grossen Sendeplaenen nicht als falscher `current`-Song durchgereicht
 
 ### HTML
