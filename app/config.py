@@ -58,6 +58,9 @@ PROVIDER_BCS_GENERIC_NAME_TOKENS = {
     "stream",
     "live",
 }
+PROVIDER_LOVERAD_SERVICE_HOST = "top-stream-service.loverad.io"
+PROVIDER_LOVERAD_IRIS_HOST_PREFIX = "iris-"
+PROVIDER_LOVERAD_IRIS_HOST_SUFFIX = ".loverad.io"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "radio_sources.db"

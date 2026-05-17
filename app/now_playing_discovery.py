@@ -41,6 +41,9 @@ from .config import (
     PROVIDER_BCS_IFRAME_HOST,
     PROVIDER_BCS_WEBRADIO_HOST,
     PROVIDER_BR_BASE_DOMAINS,
+    PROVIDER_LOVERAD_IRIS_HOST_PREFIX,
+    PROVIDER_LOVERAD_IRIS_HOST_SUFFIX,
+    PROVIDER_LOVERAD_SERVICE_HOST,
     PROVIDER_NDR_BASE_DOMAINS,
     STATION_LOOKUP_OPTIONAL_PREFIX_TOKENS,
     USER_AGENT,
@@ -140,6 +143,22 @@ BCS_CURRENT_MODE_VALUE = "current_station"
 BCS_CURRENT_STATION_PARAM = "station"
 RADIOPLAYER_EVENT_TITLE_KEYS = {"name", "title", "song", "track"}
 RADIOPLAYER_EVENT_ARTIST_KEYS = {"artistname", "artist_name", "artist"}
+LOVERAD_FLOW_OFFSET = "1"
+LOVERAD_FLOW_COUNT = "1"
+LOVERAD_STATION_WINDOW_BEFORE = 256
+LOVERAD_STATION_WINDOW_AFTER = 1800
+LOVERAD_STATION_ID_RE = re.compile(r'(?:station_id|stationid)\s*:\s*"?(?P<station_id>\d{1,10})"?', flags=re.IGNORECASE)
+LOVERAD_MANDATE_RE = re.compile(r'data-mandate=["\'](?P<mandate>[a-z0-9-]{2,32})["\']', flags=re.IGNORECASE)
+LOVERAD_IRIS_HOST_RE = re.compile(
+    rf"https?://(?P<host>{re.escape(PROVIDER_LOVERAD_IRIS_HOST_PREFIX)}[a-z0-9-]+{re.escape(PROVIDER_LOVERAD_IRIS_HOST_SUFFIX)})\b",
+    flags=re.IGNORECASE,
+)
+LOVERAD_TOP_STREAM_RE = re.compile(
+    rf"https?://{re.escape(PROVIDER_LOVERAD_SERVICE_HOST)}/v1/(?P<mandate>[a-z0-9-]{{2,32}})\b",
+    flags=re.IGNORECASE,
+)
+LOVERAD_STREAM_NAME_KEYS = ("stream", "name", "radio_name", "title", "channel")
+LOVERAD_STREAM_URL_KEYS = ("url_high", "url_low", "stream_url", "streamurl", "audio_url", "audiourl", "mount")
 
 
 @dataclass
@@ -147,6 +166,13 @@ class OfficialPlayerEntry:
     score: int
     feed_urls: list[str] = field(default_factory=list)
     follow_urls: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LoveradStationEntry:
+    station_id: str
+    stream_urls: list[str] = field(default_factory=list)
+    channel_names: list[str] = field(default_factory=list)
 
 
 class NowPlayingDiscoveryService:
@@ -388,7 +414,7 @@ class NowPlayingDiscoveryService:
             self._mark_trusted_candidate(derived)
 
         phase_started = time.perf_counter()
-        loverad_flow_urls = self._discover_loverad_flow_urls(candidates, resolved, station)
+        loverad_flow_urls = self._discover_loverad_flow_urls(document_index, candidates, resolved, station)
         phase_timings["loverad"] = time.perf_counter() - phase_started
         for flow_url in loverad_flow_urls:
             candidates.add(flow_url)
@@ -722,6 +748,12 @@ class NowPlayingDiscoveryService:
         base_domains: set[str],
     ) -> bool:
         return any(domain in base_domains for domain in PROVIDER_NDR_BASE_DOMAINS)
+
+    def _is_loverad_iris_host(self, host: str) -> bool:
+        host_value = str(host or "").strip().lower()
+        return host_value.startswith(PROVIDER_LOVERAD_IRIS_HOST_PREFIX) and host_value.endswith(
+            PROVIDER_LOVERAD_IRIS_HOST_SUFFIX
+        )
 
     def _build_ndr_station_slugs(
         self,
@@ -1271,9 +1303,9 @@ class NowPlayingDiscoveryService:
             return True
         if path.endswith(".xsl") and "status" in path:
             return True
-        if host.endswith("top-stream-service.loverad.io") and path.startswith("/v1/"):
+        if host == PROVIDER_LOVERAD_SERVICE_HOST and path.startswith("/v1/"):
             return True
-        if host.startswith("iris-") and host.endswith(".loverad.io") and path.endswith("/flow.json"):
+        if self._is_loverad_iris_host(host) and path.endswith("/flow.json"):
             return True
         if host == "brradio.br.de" and path == "/radio/v4":
             if "stationslug" in query and ("audiobroadcastservice" in query or "broadcastservice" in query):
@@ -1594,7 +1626,7 @@ class NowPlayingDiscoveryService:
         score = 0
         if host == "brradio.br.de" and path == "/radio/v4":
             score += 140
-        if host.startswith("iris-") and host.endswith(".loverad.io") and path.endswith("/flow.json"):
+        if self._is_loverad_iris_host(host) and path.endswith("/flow.json"):
             score += 90
         if path.endswith(".xml"):
             score += 5
@@ -3893,90 +3925,363 @@ class NowPlayingDiscoveryService:
 
     def _discover_loverad_flow_urls(
         self,
+        documents: list[tuple[str, str, list[str]]],
         known_candidates: set[str],
         resolved: ResolvedStream,
         station: StationMatch | None,
     ) -> set[str]:
+        station_entries = self._extract_loverad_station_entries(documents, known_candidates)
+        best_entry, best_score = self._select_loverad_station_entry(station_entries, resolved, station)
+        if not best_entry or best_score < 100:
+            return set()
+
+        iris_hosts = self._build_loverad_iris_hosts(documents, known_candidates, resolved)
+        if not iris_hosts:
+            return set()
+
         flow_urls = set()
+        for iris_host in sorted(iris_hosts):
+            flow_url = self._build_loverad_flow_url(iris_host, best_entry.station_id)
+            if not flow_url:
+                continue
+            probe_text, probe_type = self._fetch_text(flow_url)
+            if not probe_text:
+                continue
+            if not self._is_json_candidate(flow_url, probe_type, probe_text):
+                continue
+            flow_urls.add(flow_url)
+
+        if flow_urls:
+            self._log(
+                "Loverad-Flow-Match: "
+                f"station_id={best_entry.station_id} score={best_score} flows={len(flow_urls)}"
+            )
+        return flow_urls
+
+    def _extract_loverad_station_entries(
+        self,
+        documents: list[tuple[str, str, list[str]]],
+        known_candidates: set[str],
+    ) -> list[LoveradStationEntry]:
+        entries: list[LoveradStationEntry] = []
+        for candidate_url in sorted(known_candidates):
+            entries.extend(self._extract_loverad_station_entries_from_top_stream_service(candidate_url))
+        entries.extend(self._extract_loverad_station_entries_from_documents(documents))
+        return self._merge_loverad_station_entries(entries)
+
+    def _extract_loverad_station_entries_from_top_stream_service(
+        self,
+        candidate_url: str,
+    ) -> list[LoveradStationEntry]:
+        parsed = urlparse(candidate_url)
+        host = (parsed.netloc or "").lower()
+        if host != PROVIDER_LOVERAD_SERVICE_HOST:
+            return []
+
+        path_parts = [part for part in parsed.path.lower().split("/") if part]
+        if len(path_parts) < 2 or path_parts[0] != "v1":
+            return []
+
+        payload_text, content_type = self._fetch_text(candidate_url)
+        if not payload_text:
+            return []
+        if not self._is_json_candidate(candidate_url, content_type, payload_text):
+            return []
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, dict):
+            return []
+
+        entries: list[LoveradStationEntry] = []
+        for node in payload.values():
+            if not isinstance(node, dict):
+                continue
+            station_id = self._extract_json_value(node, {"station_id", "stationid"}).strip()
+            if not station_id.isdigit():
+                continue
+
+            stream_urls = self._extract_loverad_station_stream_urls_from_node(node)
+            channel_names = self._extract_loverad_station_names_from_node(node)
+            if not stream_urls and not channel_names:
+                continue
+
+            entries.append(
+                LoveradStationEntry(
+                    station_id=station_id,
+                    stream_urls=stream_urls,
+                    channel_names=channel_names,
+                )
+            )
+
+        return entries
+
+    def _extract_loverad_station_entries_from_documents(
+        self,
+        documents: list[tuple[str, str, list[str]]],
+    ) -> list[LoveradStationEntry]:
+        entries: list[LoveradStationEntry] = []
+        for _, text, _ in documents:
+            entries.extend(self._extract_inline_loverad_station_entries(text))
+        return self._merge_loverad_station_entries(entries)
+
+    def _extract_inline_loverad_station_entries(self, text: str) -> list[LoveradStationEntry]:
+        if not text:
+            return []
+
+        lower_text = text.lower()
+        if "station_id" not in lower_text and "stationid" not in lower_text:
+            return []
+
+        normalized = self._normalize_embedded_document_text(text)
+        entries: list[LoveradStationEntry] = []
+        for match in LOVERAD_STATION_ID_RE.finditer(normalized):
+            station_id = str(match.group("station_id") or "").strip()
+            if not station_id:
+                continue
+
+            window_start = max(0, match.start() - LOVERAD_STATION_WINDOW_BEFORE)
+            window_end = min(len(normalized), match.end() + LOVERAD_STATION_WINDOW_AFTER)
+            window = normalized[window_start:window_end]
+
+            stream_urls = self._extract_loverad_station_stream_urls_from_fragment(window)
+            if not stream_urls:
+                continue
+
+            channel_names = self._extract_loverad_station_names_from_fragment(window)
+            entries.append(
+                LoveradStationEntry(
+                    station_id=station_id,
+                    stream_urls=stream_urls,
+                    channel_names=channel_names,
+                )
+            )
+
+        return self._merge_loverad_station_entries(entries)
+
+    def _merge_loverad_station_entries(self, entries: list[LoveradStationEntry]) -> list[LoveradStationEntry]:
+        merged: dict[str, LoveradStationEntry] = {}
+        for entry in entries:
+            station_id = str(entry.station_id or "").strip()
+            if not station_id:
+                continue
+            bucket = merged.setdefault(station_id, LoveradStationEntry(station_id=station_id))
+            for stream_url in entry.stream_urls:
+                if stream_url and stream_url not in bucket.stream_urls:
+                    bucket.stream_urls.append(stream_url)
+            for channel_name in entry.channel_names:
+                if channel_name and channel_name not in bucket.channel_names:
+                    bucket.channel_names.append(channel_name)
+        return list(merged.values())
+
+    def _extract_loverad_station_stream_urls_from_node(self, node: dict) -> list[str]:
+        urls: list[str] = []
+        seen = set()
+        for key in LOVERAD_STREAM_URL_KEYS:
+            stream_url = self._normalize_loverad_stream_url(self._extract_json_value(node, {key}))
+            if not stream_url or stream_url in seen:
+                continue
+            seen.add(stream_url)
+            urls.append(stream_url)
+        return urls
+
+    def _extract_loverad_station_names_from_node(self, node: dict) -> list[str]:
+        names: list[str] = []
+        seen = set()
+        for key in LOVERAD_STREAM_NAME_KEYS:
+            name = self._extract_json_value(node, {key}).strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+        return names
+
+    def _extract_loverad_station_stream_urls_from_fragment(self, text: str) -> list[str]:
+        urls = []
+        seen = set()
+        for value in self._extract_script_object_string_values(text, LOVERAD_STREAM_URL_KEYS):
+            stream_url = self._normalize_loverad_stream_url(value)
+            if not stream_url or stream_url in seen:
+                continue
+            seen.add(stream_url)
+            urls.append(stream_url)
+        return urls
+
+    def _extract_loverad_station_names_from_fragment(self, text: str) -> list[str]:
+        names = []
+        seen = set()
+        for value in self._extract_script_object_string_values(text, LOVERAD_STREAM_NAME_KEYS):
+            clean = str(value or "").strip()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            names.append(clean)
+        return names
+
+    def _extract_script_object_string_values(self, text: str, keys: tuple[str, ...]) -> list[str]:
+        if not text or not keys:
+            return []
+
+        alternation = "|".join(re.escape(key) for key in sorted(keys, key=len, reverse=True))
+        pattern = rf'(?<![A-Za-z0-9_])(?:{alternation})\s*:\s*"(?P<value>[^"]+)"'
+        values = []
+        seen = set()
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            value = str(match.group("value") or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+        return values
+
+    def _normalize_loverad_stream_url(self, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return ""
+        if normalized.startswith("//"):
+            normalized = f"https:{normalized}"
+        if not is_probable_url(normalized):
+            return ""
+        return normalized
+
+    def _normalize_embedded_document_text(self, text: str) -> str:
+        return (
+            html.unescape(html.unescape(text or ""))
+            .replace("\\/", "/")
+            .replace("\\u002f", "/")
+            .replace("\\u002F", "/")
+            .replace("\\u003a", ":")
+            .replace("\\u003A", ":")
+        )
+
+    def _select_loverad_station_entry(
+        self,
+        entries: list[LoveradStationEntry],
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> tuple[LoveradStationEntry | None, int]:
+        best_entry = None
+        best_score = -1
         station_name = (station.name if station else "") or resolved.station_name or ""
 
-        for candidate_url in sorted(known_candidates):
-            parsed = urlparse(candidate_url)
-            host = (parsed.netloc or "").lower()
-            if host != "top-stream-service.loverad.io":
-                continue
+        for entry in entries:
+            score = self._score_loverad_station_entry(entry, resolved, station_name)
+            if score > best_score:
+                best_score = score
+                best_entry = entry
 
-            path_parts = [part for part in parsed.path.lower().split("/") if part]
-            if len(path_parts) < 2 or path_parts[0] != "v1":
-                continue
-            mandate = path_parts[1]
-            if not re.fullmatch(r"[a-z0-9-]{2,32}", mandate):
-                continue
+        return best_entry, best_score
 
-            payload_text, content_type = self._fetch_text(candidate_url)
-            if not payload_text:
-                continue
-            if not self._is_json_candidate(candidate_url, content_type, payload_text):
-                continue
-            try:
-                payload = json.loads(payload_text)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
+    def _score_loverad_station_entry(
+        self,
+        entry: LoveradStationEntry,
+        resolved: ResolvedStream,
+        station_name: str,
+    ) -> int:
+        score = 0
+        for stream_url in entry.stream_urls:
+            if self._stream_url_matches(stream_url, resolved.resolved_url):
+                score += 100
+            if resolved.delivery_url and self._stream_url_matches(stream_url, resolved.delivery_url):
+                score += 40
 
-            best_station_id = ""
-            best_score = -1
-            for node in payload.values():
-                if not isinstance(node, dict):
-                    continue
-
-                station_id = self._extract_json_value(node, {"station_id", "stationid"})
-                if not station_id.isdigit():
-                    continue
-
-                stream_url = self._extract_json_value(
-                    node,
-                    {"url_low", "url_high", "stream_url", "streamurl", "url"},
-                )
-                channel_name = self._extract_json_value(
-                    node,
-                    {"stream", "name", "radio_name", "title", "channel"},
-                )
-
-                score = 0
-                if stream_url:
-                    if self._stream_url_matches(stream_url, resolved.resolved_url):
-                        score += 100
-                    if resolved.delivery_url and self._stream_url_matches(stream_url, resolved.delivery_url):
-                        score += 40
-                if station_name and channel_name and self._station_name_matches(channel_name, station_name):
+        if station_name:
+            for channel_name in entry.channel_names:
+                if self._station_name_matches(channel_name, station_name):
                     score += 25
-
-                if score > best_score:
-                    best_score = score
-                    best_station_id = station_id
-
-            if best_station_id:
-                iris_hosts = {f"iris-{mandate}.loverad.io"}
-                resolved_parts = [part for part in urlparse(resolved.resolved_url).path.lower().split("/") if part]
-                for part in resolved_parts:
-                    match = re.match(r"([a-z0-9]{2,8})[-_]", part)
-                    if not match:
-                        continue
-                    iris_hosts.add(f"iris-{match.group(1)}.loverad.io")
                     break
 
-                for iris_host in sorted(iris_hosts):
-                    flow_url = f"https://{iris_host}/flow.json?station={best_station_id}&offset=1&count=1"
-                    probe_text, probe_type = self._fetch_text(flow_url)
-                    if not probe_text:
-                        continue
-                    if not self._is_json_candidate(flow_url, probe_type, probe_text):
-                        continue
-                    flow_urls.add(flow_url)
+        return score
 
-        return flow_urls
+    def _build_loverad_iris_hosts(
+        self,
+        documents: list[tuple[str, str, list[str]]],
+        known_candidates: set[str],
+        resolved: ResolvedStream,
+    ) -> set[str]:
+        iris_hosts = set()
+
+        for candidate_url in known_candidates:
+            self._remember_loverad_iris_host_from_url(candidate_url, iris_hosts)
+
+        for doc_url, text, extracted_urls in documents:
+            self._remember_loverad_iris_host_from_url(doc_url, iris_hosts)
+            for extracted_url in extracted_urls:
+                self._remember_loverad_iris_host_from_url(extracted_url, iris_hosts)
+            for mandate in self._extract_loverad_mandates_from_text(text):
+                iris_hosts.add(self._build_loverad_iris_host(mandate))
+            for host in self._extract_loverad_iris_hosts_from_text(text):
+                iris_hosts.add(host)
+
+        resolved_parts = [part for part in urlparse(resolved.resolved_url).path.lower().split("/") if part]
+        for part in resolved_parts:
+            match = re.match(r"([a-z0-9]{2,8})[-_]", part)
+            if not match:
+                continue
+            iris_hosts.add(self._build_loverad_iris_host(match.group(1)))
+            break
+
+        return {host for host in iris_hosts if self._is_loverad_iris_host(host)}
+
+    def _remember_loverad_iris_host_from_url(self, url: str, bucket: set[str]) -> None:
+        parsed = urlparse(str(url or "").strip())
+        host = (parsed.netloc or "").lower()
+        if self._is_loverad_iris_host(host):
+            bucket.add(host)
+            return
+
+        mandate = self._extract_loverad_mandate_from_url(url)
+        if mandate:
+            bucket.add(self._build_loverad_iris_host(mandate))
+
+    def _extract_loverad_mandate_from_url(self, url: str) -> str:
+        url_value = str(url or "").strip()
+        if not url_value:
+            return ""
+        match = LOVERAD_TOP_STREAM_RE.search(url_value)
+        if match:
+            return str(match.group("mandate") or "").strip().lower()
+
+        parsed = urlparse(url_value)
+        host = (parsed.netloc or "").lower()
+        if self._is_loverad_iris_host(host):
+            return host[len(PROVIDER_LOVERAD_IRIS_HOST_PREFIX) : -len(PROVIDER_LOVERAD_IRIS_HOST_SUFFIX)]
+        return ""
+
+    def _extract_loverad_mandates_from_text(self, text: str) -> set[str]:
+        mandates = {
+            str(match.group("mandate") or "").strip().lower()
+            for match in LOVERAD_MANDATE_RE.finditer(text or "")
+            if str(match.group("mandate") or "").strip()
+        }
+        for match in LOVERAD_TOP_STREAM_RE.finditer(text or ""):
+            mandate = str(match.group("mandate") or "").strip().lower()
+            if mandate:
+                mandates.add(mandate)
+        return mandates
+
+    def _extract_loverad_iris_hosts_from_text(self, text: str) -> set[str]:
+        hosts = set()
+        for match in LOVERAD_IRIS_HOST_RE.finditer(text or ""):
+            host = str(match.group("host") or "").strip().lower()
+            if host:
+                hosts.add(host)
+        return hosts
+
+    def _build_loverad_iris_host(self, mandate: str) -> str:
+        clean = str(mandate or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9-]{2,32}", clean):
+            return ""
+        return f"{PROVIDER_LOVERAD_IRIS_HOST_PREFIX}{clean}{PROVIDER_LOVERAD_IRIS_HOST_SUFFIX}"
+
+    def _build_loverad_flow_url(self, iris_host: str, station_id: str) -> str:
+        host = str(iris_host or "").strip().lower()
+        station_id = str(station_id or "").strip()
+        if not self._is_loverad_iris_host(host) or not station_id.isdigit():
+            return ""
+        query = urlencode({"station": station_id, "offset": LOVERAD_FLOW_OFFSET, "count": LOVERAD_FLOW_COUNT})
+        return f"https://{host}/flow.json?{query}"
 
     def _extract_channel_feed_urls(
         self,
