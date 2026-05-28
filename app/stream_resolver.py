@@ -46,6 +46,15 @@ class StreamResolver:
                 playlist_url = final_url
                 next_url = self._extract_stream_from_playlist(payload, playlist_url)
                 if not next_url:
+                    if self._is_terminal_media_playlist(payload):
+                        self._log("Playlist erkannt -> Media-Playlist als Endpunkt akzeptiert")
+                        return ResolvedStream(
+                            input_url=(original_input or input_url),
+                            resolved_url=current_url,
+                            delivery_url=final_url,
+                            content_type=content_type,
+                            was_playlist=was_playlist,
+                        )
                     raise StreamResolveError("Playlist gefunden, aber keine Stream-URL erkannt.")
                 self._log(f"Playlist erkannt -> erste Stream-URL: {next_url}")
                 current_url = next_url
@@ -110,6 +119,15 @@ class StreamResolver:
             return xspf_url
 
         return None
+
+    def _is_terminal_media_playlist(self, payload: bytes) -> bool:
+        text = decode_text_bytes(payload)
+        if not text:
+            return False
+        upper = text.upper()
+        if "#EXT-X-ENDLIST" in upper:
+            return True
+        return "#EXTINF:" in upper and "#EXT-X-TARGETDURATION:" in upper
 
     def _extract_from_m3u(self, text: str, base_url: str) -> Optional[str]:
         for line in text.splitlines():

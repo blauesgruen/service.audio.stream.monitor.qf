@@ -9,11 +9,11 @@
 - `app/station_lookup.py`
   - Sendername oder Station-ID -> bestes Match inkl. Web-Fallback.
 - `app/stream_resolver.py`
-  - URL-Aufloesung inkl. Redirects und Playlist-Parsing.
+  - URL-Aufloesung inkl. Redirects, Playlist-Parsing und Akzeptanz terminaler HLS-Media-Playlists als Endpunkt.
 - `app/metadata.py`
   - ICY-Metadaten lesen (`StreamTitle`, Header) und Metadaten-Texte zentral normalisieren.
 - `app/now_playing_discovery.py`
-  - Generische Suche nach XML/JSON/JSONP/HTML-Songquellen und Parsing inkl. offizieller GraphQL-Track-Feeds, providerweiter BCS-Current-Feeds mit zusaetzlichem Kanal-Selektor sowie Loverad-/Audalaxy-Flow-Ableitung aus offiziellen Stream-Katalogen.
+  - Generische Suche nach XML/JSON/JSONP/HTML-Songquellen und Parsing inkl. offizieller GraphQL-Track-Feeds, providerweiter BCS-Current-Feeds mit zusaetzlichem Kanal-Selektor, Loverad-/Audalaxy-Flow-Ableitung aus offiziellen Stream-Katalogen sowie `hr`-Radioplayer-WebSocket-Kandidaten aus offiziellen Player-Konfigurationen.
 - `app/station_identity.py`
   - Gemeinsame Stations-Normalisierung, Name-First-Lookup mit optionalem Station-ID-Fallback, Variantenbildung und `station_key`-Helfer.
 - `app/source_policy.py`
@@ -76,12 +76,13 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 3. `StreamResolver.resolve()`
    - Redirect verfolgen
    - Playlists erkennen und erste Stream-URL extrahieren
+   - terminale HLS-Media-Playlists ohne weitere Variant-URL als finalen Stream-Endpunkt akzeptieren
 4. `collect_origin_domains(...)`
    - Origin-Basisdomains aus Station + aufgeloestem Stream ableiten
 5. `SongProbeSession.probe_once()`
    - ICY lesen
    - Feed-Kandidaten entdecken und priorisieren
-   - providerstrukturierte Kandidaten (z. B. GraphQL-Tracklisten, BCS-`jsonUrl + station` oder Loverad-`station_id + iris-host`) ueber den zentralen Discovery-Kern in konkrete Songquellen ueberfuehren
+   - providerstrukturierte Kandidaten (z. B. GraphQL-Tracklisten, BCS-`jsonUrl + station`, Loverad-`station_id + iris-host` oder `hr`-Push-Kanal + WebSocket) ueber den zentralen Discovery-Kern in konkrete Songquellen ueberfuehren
    - Redirect-/Canonical-nahe Discovery-Dokumente und offizielle Player-Ketten nach weiteren Feed-Kandidaten scannen
    - XML/JSON/HTML Kandidaten abrufen (seriell oder parallel in Batches)
    - finalen Song zentral anhand Pair-Validierung und Source-Policy bestimmen
@@ -151,6 +152,6 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - Zentral: Konstanten in `config.py`, Modelle in `models.py`, Shared-Kernlogik in `station_identity.py`,
   `source_policy.py`, `song_probe.py` und `song_parity.py`.
 - Wiederverwendung: Zeitfenster-, Frische- und Text-Normalisierung sollen moeglichst zentral bleiben und nicht in einzelnen Feed-Pfaden dupliziert werden.
-- Provider-Sonderheiten werden als kleine strukturierte Adapter in die Discovery eingehaengt und weiter ueber denselben Match-/Policy-Kern bewertet; auch Loverad-/Audalaxy-Mappings bleiben damit sender-unspezifisch.
+- Provider-Sonderheiten werden als kleine strukturierte Adapter in die Discovery eingehaengt und weiter ueber denselben Match-/Policy-Kern bewertet; das gilt auch fuer Loverad-/Audalaxy- und `hr`-Radioplayer-Mappings.
 - Transparenz: Live-Log plus Rohdaten-Details.
 - Robustheit: mehrere Discovery-Seeds und heuristische Kandidatenbewertung statt Hardcode.

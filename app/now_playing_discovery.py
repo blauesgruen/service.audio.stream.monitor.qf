@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import json
+import os
 import re
+import socket
 import ssl
 import time
 import xml.etree.ElementTree as ET
@@ -41,6 +45,9 @@ from .config import (
     PROVIDER_BCS_IFRAME_HOST,
     PROVIDER_BCS_WEBRADIO_HOST,
     PROVIDER_BR_BASE_DOMAINS,
+    PROVIDER_HR_BASE_DOMAINS,
+    PROVIDER_HR_PUSH_HOST,
+    PROVIDER_HR_PUSH_PATH,
     PROVIDER_LOVERAD_IRIS_HOST_PREFIX,
     PROVIDER_LOVERAD_IRIS_HOST_SUFFIX,
     PROVIDER_LOVERAD_SERVICE_HOST,
@@ -141,8 +148,19 @@ GRAPHQL_TRACKS_ID_PARAM = "stream_id"
 BCS_CURRENT_MODE_PARAM = "_qf_bcs"
 BCS_CURRENT_MODE_VALUE = "current_station"
 BCS_CURRENT_STATION_PARAM = "station"
+HR_RADIOPLAYER_MODE_PARAM = "_qf_hrp"
+HR_RADIOPLAYER_MODE_VALUE = "radioplayer_current"
+HR_RADIOPLAYER_VERSION_PARAM = "version"
+HR_RADIOPLAYER_VERSION_VALUE = "v2"
+HR_RADIOPLAYER_EXPECTED_TYPE = "playlist"
+HR_RADIOPLAYER_MAX_MESSAGES = 3
 RADIOPLAYER_EVENT_TITLE_KEYS = {"name", "title", "song", "track"}
 RADIOPLAYER_EVENT_ARTIST_KEYS = {"artistname", "artist_name", "artist"}
+HR_RADIOPLAYER_DATA_PROPERTIES_RE = re.compile(
+    r'<div[^>]*id=["\']hr-radioplayer["\'][^>]*data-properties=(["\'])(?P<value>.*?)\1',
+    flags=re.IGNORECASE | re.DOTALL,
+)
+HR_RADIOPLAYER_TOKEN_RE = re.compile(r"(hr[1-4]|you-?fm|hr-?info(?:radio)?)", flags=re.IGNORECASE)
 LOVERAD_FLOW_OFFSET = "1"
 LOVERAD_FLOW_COUNT = "1"
 LOVERAD_STATION_WINDOW_BEFORE = 256
@@ -173,6 +191,15 @@ class LoveradStationEntry:
     station_id: str
     stream_urls: list[str] = field(default_factory=list)
     channel_names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class HrRadioPlayerEntry:
+    channel: str
+    playlist_push: str
+    stream_urls: list[str] = field(default_factory=list)
+    current_show_url: str = ""
+    full_playlist_url: str = ""
 
 
 class NowPlayingDiscoveryService:
@@ -272,6 +299,7 @@ class NowPlayingDiscoveryService:
             "playerbar": 0.0,
             "graphql": 0.0,
             "bcs": 0.0,
+            "hr": 0.0,
             "loverad": 0.0,
             "ranking": 0.0,
         }
@@ -404,6 +432,13 @@ class NowPlayingDiscoveryService:
             candidates.add(feed_url)
             self._mark_trusted_candidate(feed_url)
 
+        phase_started = time.perf_counter()
+        hr_radioplayer_feeds = self._discover_hr_radioplayer_feed_urls(document_index, resolved, station)
+        phase_timings["hr"] = time.perf_counter() - phase_started
+        for feed_url in hr_radioplayer_feeds:
+            candidates.add(feed_url)
+            self._mark_trusted_candidate(feed_url)
+
         derived_html_candidates = set()
         for candidate in list(candidates):
             for derived in self._generate_html_nowplaying_variants(candidate):
@@ -461,6 +496,7 @@ class NowPlayingDiscoveryService:
             f"playerbar={phase_timings['playerbar']:.2f}s "
             f"graphql={phase_timings['graphql']:.2f}s "
             f"bcs={phase_timings['bcs']:.2f}s "
+            f"hr={phase_timings['hr']:.2f}s "
             f"loverad={phase_timings['loverad']:.2f}s "
             f"ranking={phase_timings['ranking']:.2f}s "
             f"total={total_elapsed:.2f}s "
@@ -493,6 +529,8 @@ class NowPlayingDiscoveryService:
             return self._probe_graphql_tracks_candidate(url)
         if self._is_bcs_current_candidate(url):
             return self._probe_bcs_current_candidate(url)
+        if self._is_hr_radioplayer_candidate(url):
+            return self._probe_hr_radioplayer_candidate(url)
         request_url = url if self._looks_like_html_nowplaying_endpoint(url) else self._cache_bust_url(url)
         text, content_type = self._fetch_text(request_url)
         if not text:
@@ -748,6 +786,12 @@ class NowPlayingDiscoveryService:
         base_domains: set[str],
     ) -> bool:
         return any(domain in base_domains for domain in PROVIDER_NDR_BASE_DOMAINS)
+
+    def _is_hr_context(
+        self,
+        base_domains: set[str],
+    ) -> bool:
+        return any(domain in base_domains for domain in PROVIDER_HR_BASE_DOMAINS)
 
     def _is_loverad_iris_host(self, host: str) -> bool:
         host_value = str(host or "").strip().lower()
@@ -1073,6 +1117,318 @@ class NowPlayingDiscoveryService:
                 return True
         return False
 
+    def _discover_hr_radioplayer_feed_urls(
+        self,
+        documents: list[tuple[str, str, list[str]]],
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> set[str]:
+        base_domains = {
+            base
+            for base in (
+                get_base_domain(resolved.resolved_url),
+                get_base_domain(resolved.delivery_url),
+                get_base_domain(station.homepage if station else ""),
+            )
+            if base
+        }
+        if not self._is_hr_context(base_domains):
+            return set()
+
+        entries = self._extract_hr_radioplayer_entries(documents)
+        best_entry, best_score = self._select_hr_radioplayer_entry(entries, resolved, station)
+        if not best_entry or best_score < 100:
+            return set()
+
+        candidate_url = self._build_hr_radioplayer_candidate_url(best_entry)
+        if not candidate_url:
+            return set()
+
+        self._log(
+            "HR-Radioplayer-Match: "
+            f"channel={best_entry.channel} score={best_score}"
+        )
+        return {candidate_url}
+
+    def _extract_hr_radioplayer_entries(
+        self,
+        documents: list[tuple[str, str, list[str]]],
+    ) -> list[HrRadioPlayerEntry]:
+        entries: list[HrRadioPlayerEntry] = []
+        for _, text, _ in documents:
+            entries.extend(self._extract_hr_radioplayer_entries_from_text(text))
+        return entries
+
+    def _extract_hr_radioplayer_entries_from_text(self, text: str) -> list[HrRadioPlayerEntry]:
+        if not text or "hr-radioplayer" not in text.lower():
+            return []
+
+        entries: list[HrRadioPlayerEntry] = []
+        for match in HR_RADIOPLAYER_DATA_PROPERTIES_RE.finditer(text):
+            raw_value = str(match.group("value") or "").strip()
+            if not raw_value:
+                continue
+            try:
+                properties = json.loads(html.unescape(raw_value))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(properties, dict):
+                continue
+
+            channel = str(properties.get("radioStation") or "").strip()
+            playlist_push = self._normalize_hr_playlist_push_url(str(properties.get("playlistPush") or "").strip())
+            if not channel or not playlist_push:
+                continue
+
+            stream_urls = self._extract_hr_radioplayer_stream_urls(properties)
+            current_show_url = self._normalize_seed(str(properties.get("currentShowUrl") or "").strip())
+            full_playlist_url = self._normalize_seed(str(properties.get("fullPlaylistUrl") or "").strip())
+            entries.append(
+                HrRadioPlayerEntry(
+                    channel=channel,
+                    playlist_push=playlist_push,
+                    stream_urls=stream_urls,
+                    current_show_url=current_show_url,
+                    full_playlist_url=full_playlist_url,
+                )
+            )
+
+        return entries
+
+    def _extract_hr_radioplayer_stream_urls(self, properties: dict) -> list[str]:
+        urls: list[str] = []
+        seen = set()
+
+        def _remember(value: str) -> None:
+            normalized = self._normalize_hr_stream_url(value)
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            urls.append(normalized)
+
+        _remember(str(properties.get("streamUrl") or "").strip())
+        streams = properties.get("streams")
+        if isinstance(streams, list):
+            for item in streams:
+                if not isinstance(item, dict):
+                    continue
+                _remember(str(item.get("url") or "").strip())
+
+        return urls
+
+    def _normalize_hr_stream_url(self, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return ""
+        if normalized.startswith("//"):
+            normalized = f"https:{normalized}"
+        if not is_probable_url(normalized):
+            return ""
+        return normalized
+
+    def _normalize_hr_playlist_push_url(self, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return ""
+        if normalized.startswith("//"):
+            normalized = f"https:{normalized}"
+        elif normalized.startswith("/"):
+            normalized = f"https://{PROVIDER_HR_PUSH_HOST}{normalized}"
+        elif "://" not in normalized:
+            normalized = f"https://{normalized.lstrip('/')}"
+        parsed = urlparse(normalized)
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        if (parsed.hostname or "").lower() != PROVIDER_HR_PUSH_HOST:
+            return ""
+        path = parsed.path or "/"
+        if not path.startswith(PROVIDER_HR_PUSH_PATH):
+            return ""
+        if not path.endswith("/"):
+            path += "/"
+        return urlunparse(parsed._replace(path=path, query="", fragment=""))
+
+    def _select_hr_radioplayer_entry(
+        self,
+        entries: list[HrRadioPlayerEntry],
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> tuple[HrRadioPlayerEntry | None, int]:
+        best_entry = None
+        best_score = -1
+        for entry in entries:
+            score = self._score_hr_radioplayer_entry(entry, resolved, station)
+            if score > best_score:
+                best_score = score
+                best_entry = entry
+        return best_entry, best_score
+
+    def _score_hr_radioplayer_entry(
+        self,
+        entry: HrRadioPlayerEntry,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> int:
+        score = 0
+        station_name = (station.name if station else "") or resolved.station_name or ""
+        channel_token = self._normalize_hr_station_token(entry.channel)
+        station_tokens = self._build_hr_station_tokens(resolved, station)
+
+        if channel_token and channel_token in station_tokens:
+            score += 140
+        if station_name and self._station_name_matches(entry.channel, station_name):
+            score += 90
+        for stream_url in entry.stream_urls:
+            if self._stream_url_matches(stream_url, resolved.resolved_url):
+                score += 45
+            if resolved.delivery_url and self._stream_url_matches(stream_url, resolved.delivery_url):
+                score += 20
+        if entry.playlist_push:
+            score += 10
+        if entry.current_show_url:
+            score += 5
+        return score
+
+    def _build_hr_station_tokens(
+        self,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> set[str]:
+        tokens = set()
+        for value in (
+            station.name if station else "",
+            resolved.station_name or "",
+            resolved.input_url,
+            station.stream_url if station else "",
+            station.homepage if station else "",
+            resolved.resolved_url,
+            resolved.delivery_url,
+        ):
+            token = self._normalize_hr_station_token(value)
+            if token:
+                tokens.add(token)
+        return tokens
+
+    def _normalize_hr_station_token(self, value: str) -> str:
+        compact = compact_station_compare_text(str(value or ""))
+        if not compact:
+            return ""
+        match = HR_RADIOPLAYER_TOKEN_RE.search(compact)
+        if not match:
+            return ""
+        token = str(match.group(1) or "").lower().replace("-", "")
+        if token.startswith("hrinfo"):
+            return "hrinfo"
+        if token == "youfm":
+            return "youfm"
+        return token
+
+    def _build_hr_radioplayer_candidate_url(self, entry: HrRadioPlayerEntry) -> str:
+        playlist_push = self._normalize_hr_playlist_push_url(entry.playlist_push)
+        channel = str(entry.channel or "").strip()
+        if not playlist_push or not channel:
+            return ""
+        base = urljoin(playlist_push, channel)
+        parsed = urlparse(base)
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query[HR_RADIOPLAYER_VERSION_PARAM] = HR_RADIOPLAYER_VERSION_VALUE
+        query[HR_RADIOPLAYER_MODE_PARAM] = HR_RADIOPLAYER_MODE_VALUE
+        return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+
+    def _is_hr_radioplayer_candidate(self, url: str) -> bool:
+        parsed = urlparse(str(url or "").strip())
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        return query.get(HR_RADIOPLAYER_MODE_PARAM) == HR_RADIOPLAYER_MODE_VALUE
+
+    def _extract_hr_radioplayer_candidate_channel(self, url: str) -> str:
+        parsed = urlparse(str(url or "").strip())
+        parts = [part for part in parsed.path.split("/") if part]
+        if not parts:
+            return ""
+        return str(parts[-1] or "").strip()
+
+    def _hr_radioplayer_candidate_matches_context(
+        self,
+        url: str,
+        resolved: ResolvedStream,
+        station: StationMatch | None,
+    ) -> bool:
+        channel = self._extract_hr_radioplayer_candidate_channel(url)
+        channel_token = self._normalize_hr_station_token(channel)
+        if not channel_token:
+            return False
+
+        station_name = (station.name if station else "") or resolved.station_name or ""
+        if station_name and self._station_name_matches(channel, station_name):
+            return True
+
+        station_tokens = self._build_hr_station_tokens(resolved, station)
+        if not station_tokens:
+            return True
+        return channel_token in station_tokens
+
+    def _probe_hr_radioplayer_candidate(self, url: str) -> SongInfo | None:
+        parsed = urlparse(str(url or "").strip())
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        mode_value = str(query.pop(HR_RADIOPLAYER_MODE_PARAM, "") or "").strip()
+        if mode_value != HR_RADIOPLAYER_MODE_VALUE:
+            return None
+
+        request_url = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+        websocket_url = self._convert_http_url_to_websocket(request_url)
+        if not websocket_url:
+            return None
+
+        payload_text = self._fetch_websocket_text(websocket_url)
+        if not payload_text:
+            return None
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        payload_type = str(payload.get("type") or "").strip().lower()
+        if payload_type != HR_RADIOPLAYER_EXPECTED_TYPE:
+            return None
+
+        expected_channel = self._extract_hr_radioplayer_candidate_channel(url)
+        payload_channel = str(payload.get("channel") or "").strip()
+        if expected_channel and payload_channel and not self._station_name_matches(payload_channel, expected_channel):
+            return None
+
+        current = payload.get("current")
+        if not isinstance(current, dict) or not current:
+            return None
+
+        title = self._extract_json_value(current, TITLE_KEYS).strip()
+        artist = self._extract_artist_from_node(current).strip()
+        if title and not artist:
+            split_artist, split_title = self._split_compound_title(title)
+            if split_artist and split_title:
+                artist = split_artist
+                title = split_title
+        if not title and not artist:
+            return None
+
+        stream_title = f"{artist} - {title}".strip(" -")
+        return SongInfo(
+            stream_title=stream_title,
+            raw_metadata=payload_text,
+            artist=artist,
+            title=title,
+            source_kind="web_feed_json",
+            source_url=url,
+        )
+
+    def _convert_http_url_to_websocket(self, url: str) -> str:
+        parsed = urlparse(str(url or "").strip())
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        scheme = "wss" if parsed.scheme.lower() == "https" else "ws"
+        return urlunparse(parsed._replace(scheme=scheme))
+
     def _extract_radio_directory_slug(self, homepage: str) -> str:
         parsed = urlparse((homepage or "").strip())
         host = (parsed.hostname or "").lower()
@@ -1302,6 +1658,8 @@ class NowPlayingDiscoveryService:
         if "status-json.xsl" in path:
             return True
         if path.endswith(".xsl") and "status" in path:
+            return True
+        if self._is_hr_radioplayer_candidate(url):
             return True
         if host == PROVIDER_LOVERAD_SERVICE_HOST and path.startswith("/v1/"):
             return True
@@ -1626,6 +1984,8 @@ class NowPlayingDiscoveryService:
         score = 0
         if host == "brradio.br.de" and path == "/radio/v4":
             score += 140
+        if self._is_hr_radioplayer_candidate(url):
+            score += 110
         if self._is_loverad_iris_host(host) and path.endswith("/flow.json"):
             score += 90
         if path.endswith(".xml"):
@@ -2727,6 +3087,11 @@ class NowPlayingDiscoveryService:
                 score += 120
             else:
                 score -= 120
+        if self._is_hr_radioplayer_candidate(url):
+            if self._hr_radioplayer_candidate_matches_context(url, resolved, station):
+                score += 120
+            else:
+                score -= 120
 
         return score
 
@@ -2755,6 +3120,8 @@ class NowPlayingDiscoveryService:
             return True
         if self._is_bcs_current_candidate(url):
             return self._bcs_station_selector_matches_context(url, resolved, station)
+        if self._is_hr_radioplayer_candidate(url):
+            return self._hr_radioplayer_candidate_matches_context(url, resolved, station)
         if self._ctrl_api_candidate_signature(url):
             # ctrl-api feeds are keyed provider APIs; they often live on a shared host
             # without station-identifying path tokens, so domain/token overlap is not
@@ -4672,6 +5039,192 @@ class NowPlayingDiscoveryService:
         base = get_base_domain(url)
         if base:
             self._linked_domains.add(base)
+
+    def _fetch_websocket_text(self, url: str) -> str:
+        parsed = urlparse(str(url or "").strip())
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in {"ws", "wss"} or not parsed.netloc:
+            return ""
+
+        host = parsed.hostname or ""
+        if not host:
+            return ""
+        port = parsed.port or (443 if scheme == "wss" else 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        sock = None
+        try:
+            raw_sock = socket.create_connection((host, port), timeout=DISCOVERY_REQUEST_TIMEOUT_SECONDS)
+            raw_sock.settimeout(DISCOVERY_REQUEST_TIMEOUT_SECONDS)
+            sock = raw_sock
+            if scheme == "wss":
+                context = ssl.create_default_context()
+                try:
+                    sock = context.wrap_socket(raw_sock, server_hostname=host)
+                except ssl.SSLCertVerificationError:
+                    raw_sock.close()
+                    raw_sock = socket.create_connection((host, port), timeout=DISCOVERY_REQUEST_TIMEOUT_SECONDS)
+                    raw_sock.settimeout(DISCOVERY_REQUEST_TIMEOUT_SECONDS)
+                    sock = ssl._create_unverified_context().wrap_socket(raw_sock, server_hostname=host)
+                sock.settimeout(DISCOVERY_REQUEST_TIMEOUT_SECONDS)
+
+            buffer = self._perform_websocket_handshake(sock, host, port, path)
+            return self._receive_websocket_text_message(sock, buffer)
+        except Exception:
+            return ""
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def _perform_websocket_handshake(self, sock, host: str, port: int, path: str) -> bytearray:
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        host_header = host if port in {80, 443} else f"{host}:{port}"
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host_header}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            f"User-Agent: {USER_AGENT}\r\n"
+            "\r\n"
+        )
+        sock.sendall(request.encode("ascii"))
+        response = self._recv_until(sock, b"\r\n\r\n", 16384)
+        marker = b"\r\n\r\n"
+        split_idx = response.find(marker)
+        if split_idx < 0:
+            raise ValueError("websocket_invalid_handshake")
+        header_bytes = response[: split_idx + len(marker)]
+        buffered = bytearray(response[split_idx + len(marker) :])
+
+        if not header_bytes.startswith(b"HTTP/1.1 101") and not header_bytes.startswith(b"HTTP/1.0 101"):
+            raise ValueError("websocket_handshake_failed")
+
+        accept_match = re.search(br"Sec-WebSocket-Accept:\s*(?P<value>[^\r\n]+)", header_bytes, flags=re.IGNORECASE)
+        if not accept_match:
+            raise ValueError("websocket_missing_accept")
+        expected = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+        ).decode("ascii")
+        received = accept_match.group("value").decode("ascii", errors="ignore").strip()
+        if received != expected:
+            raise ValueError("websocket_invalid_accept")
+        return buffered
+
+    def _receive_websocket_text_message(self, sock, buffer: bytearray | None = None) -> str:
+        message_opcode = None
+        chunks: list[bytes] = []
+        messages_seen = 0
+        buffered = buffer if buffer is not None else bytearray()
+
+        while messages_seen < HR_RADIOPLAYER_MAX_MESSAGES:
+            fin, opcode, payload = self._recv_websocket_frame(sock, buffered)
+            if opcode == 0x8:
+                return ""
+            if opcode == 0x9:
+                self._send_websocket_frame(sock, 0xA, payload)
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode in {0x1, 0x2}:
+                message_opcode = opcode
+                chunks = [payload]
+                if fin:
+                    messages_seen += 1
+                    if message_opcode == 0x1:
+                        return b"".join(chunks).decode("utf-8", errors="replace")
+                    chunks = []
+                    message_opcode = None
+                continue
+            if opcode == 0x0 and message_opcode is not None:
+                chunks.append(payload)
+                if fin:
+                    messages_seen += 1
+                    if message_opcode == 0x1:
+                        return b"".join(chunks).decode("utf-8", errors="replace")
+                    chunks = []
+                    message_opcode = None
+                continue
+
+        return ""
+
+    def _recv_websocket_frame(self, sock, buffer: bytearray | None = None) -> tuple[bool, int, bytes]:
+        buffered = buffer if buffer is not None else bytearray()
+        header = self._recv_exact(sock, 2, buffered)
+        first_byte = header[0]
+        second_byte = header[1]
+        fin = bool(first_byte & 0x80)
+        opcode = first_byte & 0x0F
+        masked = bool(second_byte & 0x80)
+        payload_length = second_byte & 0x7F
+
+        if payload_length == 126:
+            payload_length = int.from_bytes(self._recv_exact(sock, 2, buffered), "big")
+        elif payload_length == 127:
+            payload_length = int.from_bytes(self._recv_exact(sock, 8, buffered), "big")
+
+        mask_key = self._recv_exact(sock, 4, buffered) if masked else b""
+        payload = self._recv_exact(sock, payload_length, buffered) if payload_length else b""
+        if masked and payload:
+            payload = bytes(byte ^ mask_key[idx % 4] for idx, byte in enumerate(payload))
+        return fin, opcode, payload
+
+    def _send_websocket_frame(self, sock, opcode: int, payload: bytes = b"") -> None:
+        payload = payload or b""
+        first_byte = 0x80 | (opcode & 0x0F)
+        mask_key = os.urandom(4)
+        payload_length = len(payload)
+
+        frame = bytearray([first_byte])
+        if payload_length < 126:
+            frame.append(0x80 | payload_length)
+        elif payload_length < 65536:
+            frame.append(0x80 | 126)
+            frame.extend(payload_length.to_bytes(2, "big"))
+        else:
+            frame.append(0x80 | 127)
+            frame.extend(payload_length.to_bytes(8, "big"))
+
+        frame.extend(mask_key)
+        if payload_length:
+            frame.extend(byte ^ mask_key[idx % 4] for idx, byte in enumerate(payload))
+        sock.sendall(bytes(frame))
+
+    def _recv_exact(self, sock, size: int, buffer: bytearray | None = None) -> bytes:
+        remaining = int(size)
+        chunks = []
+        buffered = buffer if buffer is not None else bytearray()
+        if buffered:
+            take = min(len(buffered), remaining)
+            if take:
+                chunks.append(bytes(buffered[:take]))
+                del buffered[:take]
+                remaining -= take
+        while remaining > 0:
+            chunk = sock.recv(remaining)
+            if not chunk:
+                raise ValueError("websocket_unexpected_eof")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _recv_until(self, sock, marker: bytes, max_bytes: int) -> bytes:
+        data = bytearray()
+        marker = bytes(marker)
+        while len(data) < max_bytes:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if marker in data:
+                break
+        return bytes(data)
 
     def _fetch_text_once(self, url: str, context=None) -> tuple[str, str]:
         request = Request(url, headers={"User-Agent": USER_AGENT})

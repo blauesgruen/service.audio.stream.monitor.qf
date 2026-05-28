@@ -17,11 +17,11 @@ Dieses Dokument richtet sich an Entwickler, die das Tool erweitern, refactoren o
 - `app/station_lookup.py`
   - Name/Station-ID -> StationMatch
 - `app/stream_resolver.py`
-  - URL/Playlist -> ResolvedStream
+  - URL/Playlist -> ResolvedStream, inkl. terminaler HLS-Media-Playlisten als Endpunkt
 - `app/metadata.py`
   - Stream-ICY -> SongInfo, inkl. zentraler Metadaten-Normalisierung
 - `app/now_playing_discovery.py`
-  - Web-Discovery + XML/JSON/JSONP/HTML/GraphQL Parsing sowie providerstrukturierte Feed-Ableitung -> SongInfo
+  - Web-Discovery + XML/JSON/JSONP/HTML/GraphQL Parsing sowie providerstrukturierte Feed-Ableitung inkl. Loverad/Audalaxy und `hr`-Radioplayer -> SongInfo
 - `app/station_identity.py`
   - gemeinsame Stations-Normalisierung, Lookup-Varianten, Name-First- und Station-ID-Fallback-Helfer sowie `station_key`-Hilfen
 - `app/source_policy.py`
@@ -130,6 +130,7 @@ Wichtig:
 - begrenzt durch `MAX_REDIRECTS`
 - erkennt Playlists ueber Suffix/Content-Type
 - extrahiert erste Stream-URL aus `m3u`, `pls`, `xspf`
+- behandelt HLS-Media-Playlists mit Segmentlisten (`#EXTINF`, `#EXT-X-TARGETDURATION`) ohne weitere Variant-URL als finalen Stream-Endpunkt statt als Fehler
 
 ### `SongMetadataFetcher` (`app/metadata.py`)
 
@@ -167,12 +168,27 @@ Wichtig:
 - JSONP-Payloads werden zentral entpackt; offizielle GraphQL-Track-Feeds werden ueber einen spezialisierten Zeitfenster-Pfad bewertet
 - providerweite BCS-Player koennen aus offiziellen `webradio`-/`iframe`-Seiten ein strukturiertes Paar aus `jsonUrl` + `station` ableiten; der gemeinsame JSON-Feed wird danach gezielt auf den passenden Unterkanal reduziert
 - Loverad-/Audalaxy-Frontends koennen aus offiziellen Stream-Katalogen oder eingebetteten Bootstrap-Daten ein strukturiertes Paar aus `station_id` + `iris-host` ableiten; der gemeinsame `flow.json`-Feed wird danach gezielt nur fuer den gematchten Unterkanal erzeugt
+- `hr`-Radioplayer-Frontends koennen aus offiziellen `data-properties`-Konfigurationen einen strukturierten Kandidaten aus `playlistPush` + `radioStation` ableiten; der aktuelle Song kommt danach ausschliesslich aus `current` des offiziellen Push-WebSockets
 - HTTP-Transport mit Best-Effort-Fallback (`https` -> unverified SSL bei Cert-Fehler -> optional `http`)
 - `trusted` markiert Discovery-Quellen aus offizieller Player-Kette; nur mit `ALLOW_OFFICIAL_CHAIN_SOURCES=True` zusaetzlich erlaubt
 - zusaetzliche generische Player-Config-Extraktion (`data-mandate` + `webradio.js` -> `config.json` -> `currentUrl`/`playlistUrl`)
 - zusaetzliche schmale Playerbar-Extraktion: offizielle `playerbarContainer.json`-Dokumente werden nur bei echtem Stream-Match verfolgt und liefern dann ihre `playlist.feedUrl` als Kandidat
 - offizielle Frontends koennen zusaetzlich generische GraphQL-Track-Kandidaten liefern; die Auswahl des aktiven Tracks bleibt dabei in den zentralen Zeitfenster-Helfern, faellt bei fehlendem aktivem Eintrag aber bewusst nicht auf den generischen JSON-Walk zurueck
 - providerbezogene Hosts, Regexe und Ableitungsparameter bleiben als zentrale Konstanten in `app/config.py` bzw. im Kopf von `app/now_playing_discovery.py`; die eigentliche Senderzuordnung bleibt im gemeinsamen Match-Kern (`_stream_url_matches`, `_station_name_matches`)
+
+### `song_validation.py`
+
+Wichtige Helfer:
+
+- `build_station_hints(...)`
+- `prefilter_pair(...)`
+- `is_valid_song_candidate(...)`
+
+Wichtig:
+
+- Pair-Validierung bleibt fuer GUI und Kodi zentral
+- kurze Einzel-Fragmente aus Stationsnamen werden nicht mehr blind als Hint uebernommen
+- dadurch bleiben Schutzregeln gegen Sender-/Jingle-Texte erhalten, ohne echte Titel mit haeufigen Woertern wie `you` faelschlich zu verwerfen
 
 ### Shared-Kernmodule (`app/`)
 

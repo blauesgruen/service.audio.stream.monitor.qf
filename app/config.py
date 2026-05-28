@@ -43,6 +43,18 @@ PROVIDER_NDR_BASE_DOMAINS = {
     "ndr.de",
 }
 
+PROVIDER_HR_BASE_DOMAINS = {
+    "hr.de",
+    "hr1.de",
+    "hr2.de",
+    "hr3.de",
+    "hr4.de",
+    "you-fm.de",
+    "hr-inforadio.de",
+}
+PROVIDER_HR_PUSH_HOST = "push.hr.de"
+PROVIDER_HR_PUSH_PATH = "/push/"
+
 PROVIDER_BCS_BASE_DOMAINS = {
     "bcs-systems.de",
     "hitradio-rtl.de",

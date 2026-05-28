@@ -36,6 +36,19 @@ def normalize_station_compare_text(text: str) -> str:
     return value
 
 
+def is_station_hint_fragment_candidate(text: str) -> bool:
+    tokens = normalize_station_compare_text(text).split()
+    if not tokens:
+        return False
+    if len(tokens) != 1:
+        return True
+
+    token = tokens[0]
+    if token in {"radio", "live", "music", "hits", "news", "fm"}:
+        return False
+    return len(token) >= 5 or any(char.isdigit() for char in token)
+
+
 def build_station_hints(raw_values: list[str] | tuple[str, ...]) -> list[str]:
     hints: list[str] = []
     seen = set()
@@ -49,17 +62,15 @@ def build_station_hints(raw_values: list[str] | tuple[str, ...]) -> list[str]:
         tokens = normalize_station_compare_text(val).split()
         if len(tokens) >= 2:
             tail = tokens[-1]
-            if tail.isalpha() and len(tail) <= 3:
-                variants.append(" ".join(tokens[:-1]))
+            head_variant = " ".join(tokens[:-1])
+            if tail.isalpha() and len(tail) <= 3 and is_station_hint_fragment_candidate(head_variant):
+                variants.append(head_variant)
         if len(tokens) >= 2 and tokens[0].isalpha() and tokens[1].isdigit():
             variants.append(f"{tokens[0]} {tokens[1]}")
             variants.append(f"{tokens[0]}{tokens[1]}")
         if tokens:
             lead = tokens[0]
-            if (
-                lead not in {"radio", "live", "music", "hits", "news"}
-                and (len(lead) >= 5 or any(char.isdigit() for char in lead))
-            ):
+            if is_station_hint_fragment_candidate(lead):
                 variants.append(lead)
         for raw in variants:
             norm = normalize_station_compare_text(raw)

@@ -9,6 +9,7 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Sendernamen-Lookup mit generischen Token-Varianten (z. B. Teilphrasen), ohne sender-spezifische Sonderfaelle
 - Name-First-Lookup mit optionalem `Station-ID`-/Slug-Fallback fuer Radio-Browser-UUIDs oder stabile Slugs, inkl. zusaetzlichem Web-Directory-Fallback
 - Auflösung zur Original-Stream-Quelle (Redirects + `m3u`/`pls`/`xspf`)
+- HLS-Media-Playlists ohne weitere Variant-URL werden als gueltiger Stream-Endpunkt akzeptiert
 - Generische Now-Playing-Discovery (keine sender-spezifischen Hardcodes)
 - Abruf der aktuellen Songinfo per ICY-Metadaten (`StreamTitle`)
 - Discovery laeuft auch weiter, wenn ICY keinen `StreamTitle` liefert
@@ -20,6 +21,7 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Discovery kann offizielle GraphQL-Track-Feeds aus einer verlinkten Player-Kette generisch ableiten und ueber denselben Zeitfenster-/Policy-Kern bewerten
 - Discovery kann providerweite BCS-Current-Feeds aus offiziellen `webradio`-/`iframe`-Seiten ableiten und ueber einen zusaetzlichen `station`-Selektor gezielt den passenden Kanal aus einem gemeinsamen JSON waehlen
 - Discovery kann bei Loverad-/Audalaxy-Frontends eingebettete offizielle Stream-Kataloge (z. B. aus `__NUXT__`/Bootstrap-Daten) generisch gegen den aufgeloesten Sender matchen und daraus den passenden `iris-.../flow.json`-Feed ableiten
+- Discovery kann bei `hr`-Radioplayer-Frontends aus offiziellen `data-properties`-Konfigurationen den passenden Push-Kanal ableiten und darueber den aktuellen Song aus dem offiziellen WebSocket lesen
 - Offizielle GraphQL-Schedule-Feeds werden nur noch ueber ihre spezialisierte Zeitfenster-Auswertung bewertet; wenn dort kein aktiver Track vorliegt, faellt der Parser bewusst nicht auf einen generischen alten JSON-Track zurueck
 - Feed-Probing kann parallel in Batches laufen (`NOWPLAYING_PARALLEL_*` in `app/config.py`)
 - Discovery-Crawl fuer Seed-Seiten und Script-Assets kann begrenzt parallel laufen (`DISCOVERY_*` in `app/config.py`)
@@ -37,6 +39,7 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Metadaten-Texte werden zentral normalisiert, damit haeufige Mojibake-Faelle aus falsch dekodierten UTF-8-Texten nicht als kaputte Anzeige in GUI/Kodi landen
 - Redaktionelle HTML-Seiten (z. B. Podcast-/Artikel-Slugs ohne echte Now-Playing-Struktur) werden fuer direkte Feed-Probes generisch abgewertet bzw. aussortiert
 - Songanzeige nur bei eindeutigem `artist` + `title`
+- Pair-Validierung bleibt strikt, erzeugt aber keine zu aggressiven Kurz-Hinweise mehr aus Stationsnamen wie `YOU FM`
 - Best-Effort EPG-Probe (falls Sender EPG/SI.xml online bereitstellt)
 - Live-Log in separatem Fenster
 - Quell-Details-Fenster mit Rohdaten (Lookup-JSON, Header, Raw-Metadaten, EPG-XML)
