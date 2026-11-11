@@ -28,7 +28,7 @@
 ## Persistenz und Integrationen
 - GUI speichert in `radio_sources.db` via Tabelle `verified_sources` (`app/database.py`, unique `(input_url, resolved_url)`).
 - Kodi-Bridge schreibt separat in `special://userdata/addon_data/<addon_id>/song_data.db`, Tabelle `verified_station_sources` (`service.py`).
-- Externe Integrationen: Radio-Browser Mirrors (`RADIO_BROWSER_BASE_URLS`), HTTP/ICY Streams, XML/JSON/HTML-NowPlaying-Feeds, optionale EPG-SPI-Pfade.
+- Externe Integrationen: dynamisch ermittelte Radio-Browser Mirrors, HTTP/ICY Streams, XML/JSON/HTML-NowPlaying-Feeds, optionale EPG-SPI-Pfade.
 
 ## Entwickler-Workflows (real im Repo verankert)
 - Start GUI laut Doku: `python3 main.py` (README); unter Windows typischerweise `python main.py`.

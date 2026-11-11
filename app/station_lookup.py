@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import html
 import json
+import random
 import re
+import socket
 import ssl
+import threading
+import time
 from difflib import SequenceMatcher
 from urllib.parse import quote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from .config import (
-    RADIO_BROWSER_BASE_URLS,
     RADIO_BROWSER_LOOKUP_LIMIT,
     RADIO_BROWSER_SEARCH_LOOKUP_LIMIT,
     REQUEST_TIMEOUT_SECONDS,
@@ -48,12 +51,78 @@ from .utils import (
 
 
 class StationLookupError(Exception):
-    pass
+    def __init__(self, message: str, error_class: str = "station_lookup_unavailable") -> None:
+        super().__init__(message)
+        self.error_class = error_class
 
 
 class StationLookupService:
+    _server_cache: list[str] = []
+    _server_cache_expires = 0.0
+    _server_cache_lock = threading.Lock()
+
     def __init__(self, log) -> None:
         self._log = log
+
+    @staticmethod
+    def _is_dns_failure(errors: list[str]) -> bool:
+        markers = (
+            "getaddrinfo failed",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "nodename nor servname",
+            "no such host",
+            "host not found",
+            "11001",
+            "11004",
+        )
+        joined = " ".join(errors).lower()
+        return any(marker in joined for marker in markers)
+
+    def _get_server_urls(self) -> list[str]:
+        """Discover current Radio-Browser API hosts through the documented anycast DNS name."""
+        now = time.monotonic()
+        with self._server_cache_lock:
+            if self._server_cache and now < self._server_cache_expires:
+                servers = list(self._server_cache)
+                random.shuffle(servers)
+                return servers
+
+        discovered = set()
+        errors = []
+        try:
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo("all.api.radio-browser.info", None, type=socket.SOCK_STREAM)
+            }
+        except OSError as err:
+            addresses = set()
+            errors.append(str(err))
+
+        for address in addresses:
+            try:
+                hostname = socket.gethostbyaddr(address)[0].rstrip(".").lower()
+            except OSError as err:
+                errors.append(str(err))
+                continue
+            if hostname.endswith(".api.radio-browser.info") and hostname != "all.api.radio-browser.info":
+                discovered.add(f"https://{hostname}")
+
+        if not discovered:
+            error_class = "dns_error" if self._is_dns_failure(errors) else "radio_browser_server_discovery_failed"
+            raise StationLookupError(
+                "Radio-Browser-Server konnten nicht dynamisch ermittelt werden"
+                + (": " + " | ".join(errors) if errors else ""),
+                error_class=error_class,
+            )
+
+        servers = sorted(discovered)
+        random.shuffle(servers)
+        with self._server_cache_lock:
+            self._server_cache = list(servers)
+            self._server_cache_expires = time.monotonic() + 300
+        self._log(f"Radio-Browser-Server dynamisch ermittelt: {len(servers)}")
+        return servers
 
     def _fold_german_umlauts(self, value: str) -> str:
         text = str(value or "")
@@ -81,9 +150,10 @@ class StationLookupService:
         lookup_queries = self._build_lookup_queries(query_clean)
         search_queries = self._build_search_queries(query_clean, lookup_queries)
 
+        servers = self._get_server_urls()
         for lookup_query in lookup_queries:
             query_candidates: list[StationMatch] = []
-            for base_url in RADIO_BROWSER_BASE_URLS:
+            for base_url in servers:
                 endpoint = (
                     f"{base_url}/json/stations/byname/{quote(lookup_query)}"
                     f"?hidebroken=true&limit={RADIO_BROWSER_LOOKUP_LIMIT}&order=votes&reverse=true"
@@ -133,10 +203,11 @@ class StationLookupService:
                 return fallback_station
 
             if successful_requests == 0 and errors:
-                raise StationLookupError("Sender-Suche fehlgeschlagen: " + " | ".join(errors))
+                error_class = "dns_error" if self._is_dns_failure(errors) else "station_lookup_unavailable"
+                raise StationLookupError("Sender-Suche fehlgeschlagen: " + " | ".join(errors), error_class=error_class)
             if errors:
                 self._log("Hinweis: einzelne Sender-Suche-Mirrors nicht erreichbar: " + " | ".join(errors))
-            raise StationLookupError(f"Keinen passenden Sender gefunden für '{query_clean}'.")
+            raise StationLookupError(f"Keinen passenden Sender gefunden für '{query_clean}'.", error_class="station_not_found")
 
         deduped = self._dedupe_candidates(collected)
         ranked = sorted(deduped, key=lambda station: self._score_station(station, query_clean), reverse=True)
@@ -231,7 +302,7 @@ class StationLookupService:
                     f"votes={fallback_station.votes}"
                 )
                 return fallback_station
-            raise StationLookupError(f"Keinen passenden Sender gefunden für '{query_clean}'.")
+            raise StationLookupError(f"Keinen passenden Sender gefunden für '{query_clean}'.", error_class="station_not_found")
 
         self._apply_query_alias_name(best, query_clean)
         self._log(
@@ -240,66 +311,78 @@ class StationLookupService:
         return best
 
     def find_by_id(self, stationuuid: str) -> StationMatch:
-        uuid_clean = str(stationuuid or "").strip()
-        if not uuid_clean:
-            raise StationLookupError("Keine Station-UUID angegeben.")
+        value = str(stationuuid or "").strip()
+        if not value:
+            raise StationLookupError("Keine Station-UUID angegeben.", error_class="station_not_found")
 
+        servers = self._get_server_urls()
         errors = []
-        for base_url in RADIO_BROWSER_BASE_URLS:
-            endpoint = f"{base_url}/json/stations/byuuid/{quote(uuid_clean)}"
-            self._log(f"Sender-Direkt-Abfrage gegen: {base_url} (uuid='{uuid_clean}')")
+        successful_requests = 0
+        is_uuid = bool(re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+            value,
+        ))
+        if is_uuid:
+            for base_url in servers:
+                endpoint = f"{base_url}/json/stations/byuuid/{quote(value)}"
+                self._log(f"Sender-Direkt-Abfrage gegen: {base_url} (uuid='{value}')")
+                try:
+                    request = Request(endpoint, headers={"User-Agent": USER_AGENT})
+                    with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                        payload = json.load(response)
+                    successful_requests += 1
+                except Exception as err:
+                    errors.append(f"{base_url} [uuid:{value}]: {err}")
+                    continue
+                candidates = self._extract_candidates(payload)
+                if candidates:
+                    best = candidates[0]
+                    self._log(f"Sender-Match (ID): {best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}")
+                    return best
+
+        # Search the slug directly and compare normalized station names. This handles
+        # concatenated IDs such as "starfmberlin" that do not tokenize like a name.
+        slug_key = self._compact_compare_key(value)
+        slug_candidates = []
+        for base_url in servers:
+            endpoint = f"{base_url}/json/stations/byname/{quote(value)}?hidebroken=true&limit={RADIO_BROWSER_LOOKUP_LIMIT}&order=votes&reverse=true"
             try:
                 request = Request(endpoint, headers={"User-Agent": USER_AGENT})
                 with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                     payload = json.load(response)
+                successful_requests += 1
             except Exception as err:
-                errors.append(f"{base_url} [uuid:{uuid_clean}]: {err}")
+                errors.append(f"{base_url} [id-slug:{value}]: {err}")
                 continue
-
-            candidates = self._extract_candidates(payload)
-            if candidates:
-                best = candidates[0]
-                self._log(
-                    "Sender-Match (ID): "
-                    f"{best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
-                )
+            for candidate in self._extract_candidates(payload):
+                candidate_key = self._compact_compare_key(candidate.name)
+                if slug_key and candidate_key and (candidate_key == slug_key or candidate_key.startswith(slug_key)):
+                    slug_candidates.append(candidate)
+            if slug_candidates:
+                best = max(slug_candidates, key=lambda candidate: self._score_station(candidate, value))
+                self._log(f"Sender-Match (ID-Slug): {best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}")
                 return best
 
-        # Fallback: Namens-Suche mit der ID (viele Addons nutzen Slugs als IDs)
-        for base_url in RADIO_BROWSER_BASE_URLS:
-            endpoint = f"{base_url}/json/stations/byname/{quote(uuid_clean)}?limit=1"
-            self._log(f"Sender-ID-Suche (Slug) gegen: {base_url} (id='{uuid_clean}')")
-            try:
-                request = Request(endpoint, headers={"User-Agent": USER_AGENT})
-                with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                    payload = json.load(response)
-            except Exception as err:
-                errors.append(f"{base_url} [id-slug:{uuid_clean}]: {err}")
-                continue
+        # Addons may pass a station slug as ID. Rank and validate it through name lookup.
+        try:
+            return self.find_best_match(value, station_id=value)
+        except StationLookupError as err:
+            errors.append(str(err))
+            if getattr(err, "error_class", "") == "station_lookup_unavailable":
+                raise
+            if getattr(err, "error_class", "") == "station_not_found":
+                successful_requests += 1
 
-            candidates = self._extract_candidates(payload)
-            if candidates:
-                best = candidates[0]
-                self._log(
-                    "Sender-Match (ID-Slug): "
-                    f"{best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
-                )
-                return best
-
-        fallback_station = self._fallback_web_directory_station(uuid_clean)
+        fallback_station = self._fallback_web_directory_station(value)
         if fallback_station:
-            self._apply_query_alias_name(fallback_station, uuid_clean)
-            self._log(
-                "Sender-Match (ID-Web-Fallback): "
-                f"{fallback_station.name} | {fallback_station.country or '-'} | "
-                f"{fallback_station.codec or '-'} {fallback_station.bitrate}kbps | "
-                f"votes={fallback_station.votes}"
-            )
+            self._apply_query_alias_name(fallback_station, value)
+            self._log(f"Sender-Match (ID-Web-Fallback): {fallback_station.name} | {fallback_station.country or '-'} | {fallback_station.codec or '-'} {fallback_station.bitrate}kbps | votes={fallback_station.votes}")
             return fallback_station
 
-        if errors:
-            raise StationLookupError("Sender-Abfrage fehlgeschlagen: " + " | ".join(errors))
-        raise StationLookupError(f"Keinen passenden Sender gefunden für ID '{uuid_clean}'.")
+        if successful_requests == 0 and errors:
+            error_class = "dns_error" if self._is_dns_failure(errors) else "station_lookup_unavailable"
+            raise StationLookupError("Sender-Abfrage fehlgeschlagen: " + " | ".join(errors), error_class=error_class)
+        raise StationLookupError(f"Keinen passenden Sender gefunden for ID '{value}'.", error_class="station_not_found")
 
     def _apply_query_alias_name(self, station: StationMatch, query: str) -> None:
         query_tokens = self._build_signature_tokens(query)
@@ -339,9 +422,10 @@ class StationLookupService:
         collected: list[StationMatch] = []
         successful_requests = 0
 
+        servers = self._get_server_urls()
         for search_query in search_queries:
             query_candidates: list[StationMatch] = []
-            for base_url in RADIO_BROWSER_BASE_URLS:
+            for base_url in servers:
                 endpoint = (
                     f"{base_url}/json/stations/search"
                     f"?name={quote(search_query)}"

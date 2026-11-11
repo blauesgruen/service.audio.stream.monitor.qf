@@ -115,7 +115,7 @@ Radio-Browser Match inkl. `raw_record` fuer Rohdatenanzeige.
 
 Wichtig:
 
-- nutzt mehrere Radio-Browser Mirrors (`RADIO_BROWSER_BASE_URLS`)
+- ermittelt Radio-Browser-Mirrors dynamisch ueber `all.api.radio-browser.info` und verteilt Requests zufaellig auf die gefundenen Hosts
 - erzeugt Lookup- und Slug-Varianten aus generischen Token-Fenstern (keine sender-festen Regeln)
 - dedupliziert und scored Kandidaten
 - Web-Fallback prueft mehrere Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`)
@@ -383,6 +383,7 @@ Response-Felder (`ASM-QF` -> `ASM`):
 Semantik `StationUsed`:
 
 - ASM-QF liefert den sanitisierten Wert in `response.meta.station_used`
+- `response.meta.error_class` unterscheidet unter anderem `station_not_found`, `dns_error`, `station_lookup_unavailable` und `song_not_recognized`
 - ASM uebernimmt diesen Wert und setzt sein eigenes Runtime-Label im ASM-Namespace
 - damit bleibt der QF-Response-Contract schlank und ohne eigenes `Response.StationUsed`-Property
 - der Wert kann bei Fehler-/Blocked-/Abbruchpfaden leer sein

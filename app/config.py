@@ -230,12 +230,6 @@ STATION_LOOKUP_NUMBER_TOKEN_MAP = {
 STATION_LOOKUP_SLUG_MIN_LENGTH = 3
 STATION_LOOKUP_MAX_SLUG_VARIANTS = 20
 
-RADIO_BROWSER_BASE_URLS = [
-    "http://de1.api.radio-browser.info",
-    "http://fr1.api.radio-browser.info",
-    "http://nl1.api.radio-browser.info",
-]
-
 EPG_REQUEST_TIMEOUT_SECONDS = 6
 EPG_READ_BYTES = 1048576
 EPG_SEARCH_DEFAULT_ENABLED = False

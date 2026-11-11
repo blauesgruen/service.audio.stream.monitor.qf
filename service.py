@@ -1513,6 +1513,7 @@ class QFBridgeService(xbmc.Monitor):
 
         phase_timings = {}
         verified_fastpath_state = "disabled"
+        lookup_error_class = "station_not_found"
 
         def _mark_phase(name, started_at):
             if not self.QF_TELEMETRY_ENABLED:
@@ -1602,6 +1603,7 @@ class QFBridgeService(xbmc.Monitor):
                     )
                     stream_seed = station.stream_url
                 except Exception as err:
+                    lookup_error_class = getattr(err, "error_class", "station_lookup_unavailable")
                     self.logger.warning("station_lookup_failed", station=station_input, station_id=station_id_norm, error=str(err))
                     if not self.is_probable_url(station_input):
                         stream_seed = ""
@@ -1610,15 +1612,17 @@ class QFBridgeService(xbmc.Monitor):
                     station = self._find_station_by_name_with_fallback(lookup, station_input)
                     stream_seed = station.stream_url
                 except Exception as err:
+                    lookup_error_class = getattr(err, "error_class", "station_lookup_unavailable")
                     self.logger.warning("station_lookup_failed", station=station_input, error=str(err))
                     stream_seed = ""
 
             stream_seed = str(stream_seed or "").strip()
             if not stream_seed:
-                no_seed_reason = "station_lookup_failed" if station_id_norm else "missing_station"
+                no_seed_reason = "station_not_found" if lookup_error_class == "station_not_found" else "station_lookup_failed"
                 no_seed_meta = {
                     "station": station.name if station else station_input,
                     "station_id": station_id_value,
+                    "error_class": lookup_error_class,
                 }
                 if station_id_norm and not station_input:
                     no_seed_meta["lookup_mode"] = "station_id_only"
@@ -1839,6 +1843,7 @@ class QFBridgeService(xbmc.Monitor):
             )
 
         reason = "generic_or_non_song"
+        meta["error_class"] = "song_not_recognized"
         if stream_error:
             reason = "no_stream_title"
             meta["stream_error"] = stream_error
@@ -2008,7 +2013,7 @@ class QFBridgeService(xbmc.Monitor):
             _finalize_request(
                 status="no_hit",
                 reason="missing_station",
-                meta={"mode": mode or "", "request_ts": req_ts or ""},
+                meta={"mode": mode or "", "request_ts": req_ts or "", "error_class": "missing_station"},
             )
             return
 
@@ -2118,13 +2123,16 @@ class QFBridgeService(xbmc.Monitor):
                 self._store_cached_result(station_key, result)
             else:
                 self._invalidate_cached_result(station_key)
+            result_meta = dict(result.get("meta") or {})
+            if (result.get("status") or "") == "no_hit" and not result_meta.get("error_class"):
+                result_meta["error_class"] = "station_not_found" if (result.get("reason") or "") in {"station_not_found", "missing_station"} else "song_not_recognized"
             _finalize_request(
                 status=result.get("status") or "error",
                 reason=result.get("reason") or "",
                 artist=result.get("artist") or "",
                 title=result.get("title") or "",
                 source=result.get("source") or "",
-                meta=result.get("meta") or {},
+                meta=result_meta,
             )
         except Exception as err:
             message = str(err)
@@ -2141,7 +2149,7 @@ class QFBridgeService(xbmc.Monitor):
             _finalize_request(
                 status=status,
                 reason="resolver_exception",
-                meta={"error": message},
+                meta={"error": message, "error_class": "resolver_exception"},
             )
 
     def run(self):

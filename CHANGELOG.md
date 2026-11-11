@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-11
+
+- ASM-QF-Version auf `0.1.8` erhoeht.
+- Radio-Browser-Server werden dynamisch ueber `all.api.radio-browser.info` ermittelt statt fest eingetragen.
+- „Sender nicht gefunden“ wird von DNS- und allgemeinen Serverfehlern getrennt; die Fehlerklasse steht in `Response.Meta.error_class`.
+- Station-ID-Slugs wie `starfmberlin` werden als Namenssuche ausgewertet und nicht als UUID behandelt.
+
 ## 2026-05-17
 
 - Now-Playing-Discovery um einen generischen Loverad-/Audalaxy-Adapter erweitert.
