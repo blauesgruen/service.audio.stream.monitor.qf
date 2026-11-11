@@ -11,7 +11,7 @@ import ssl
 import threading
 import time
 from difflib import SequenceMatcher
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from .config import (
@@ -51,9 +51,10 @@ from .utils import (
 
 
 class StationLookupError(Exception):
-    def __init__(self, message: str, error_class: str = "station_lookup_unavailable") -> None:
+    def __init__(self, message: str, error_class: str = "station_lookup_unavailable", details: dict | None = None) -> None:
         super().__init__(message)
         self.error_class = error_class
+        self.details = dict(details or {})
 
 
 class StationLookupService:
@@ -212,6 +213,15 @@ class StationLookupService:
         deduped = self._dedupe_candidates(collected)
         ranked = sorted(deduped, key=lambda station: self._score_station(station, query_clean), reverse=True)
         best = ranked[0]
+        strict_candidates = [
+            candidate
+            for candidate in deduped
+            if self._is_confident_station_match(candidate, query_clean, station_id=station_id)
+        ]
+        if self._is_confident_station_match(best, query_clean, station_id=station_id) and len(strict_candidates) > 1:
+            selected = self._select_semantic_candidate(strict_candidates, query_clean, station_id=station_id)
+            if selected:
+                return selected
 
         if not station_id and self._is_single_token_lookup_query(query_clean):
             direct_fallback_station = self._fallback_web_directory_station(query_clean)
@@ -244,6 +254,17 @@ class StationLookupService:
                     ranked = sorted(deduped, key=lambda station: self._score_station(station, query_clean), reverse=True)
                     best = ranked[0]
                     if self._is_confident_station_match(best, query_clean, station_id=station_id):
+                        strict_candidates = [
+                            candidate
+                            for candidate in deduped
+                            if self._is_confident_station_match(candidate, query_clean, station_id=station_id)
+                        ]
+                        if len(strict_candidates) > 1:
+                            selected = self._select_semantic_candidate(strict_candidates, query_clean, station_id=station_id)
+                            if selected:
+                                return selected
+                        best.match_method = "strict_name_tokens"
+                        best.match_evidence = ["strict_station_name_match"]
                         self._log(
                             "Sender-Match (Search-Refine): "
                             f"{best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
@@ -272,6 +293,13 @@ class StationLookupService:
                         "Sender-Match verworfen (zu geringe Token-Deckung): "
                         f"{best.name}"
                     )
+            semantic_station = self._select_semantic_candidate(deduped, query_clean, station_id=station_id)
+            if semantic_station:
+                self._log(
+                    "Sender-Match (semantischer Token-Abgleich): "
+                    f"{semantic_station.name} | evidence={','.join(semantic_station.match_evidence)}"
+                )
+                return semantic_station
             channel_fallback_station = self._fallback_channel_station_from_anchor(query_clean, best, station_id=station_id)
             if channel_fallback_station:
                 self._apply_query_alias_name(channel_fallback_station, query_clean)
@@ -305,6 +333,9 @@ class StationLookupService:
             raise StationLookupError(f"Keinen passenden Sender gefunden für '{query_clean}'.", error_class="station_not_found")
 
         self._apply_query_alias_name(best, query_clean)
+        if not best.match_method:
+            best.match_method = "strict_name_tokens"
+            best.match_evidence = ["strict_station_name_match"]
         self._log(
             f"Sender-Match: {best.name} | {best.country} | {best.codec} {best.bitrate}kbps | votes={best.votes}"
         )
@@ -368,7 +399,7 @@ class StationLookupService:
             return self.find_best_match(value, station_id=value)
         except StationLookupError as err:
             errors.append(str(err))
-            if getattr(err, "error_class", "") == "station_lookup_unavailable":
+            if getattr(err, "error_class", "") in {"station_lookup_unavailable", "station_ambiguous"}:
                 raise
             if getattr(err, "error_class", "") == "station_not_found":
                 successful_requests += 1
@@ -446,11 +477,6 @@ class StationLookupService:
                     query_candidates.extend(candidates)
                     collected.extend(candidates)
                     break
-
-            if query_candidates and any(
-                self._is_confident_station_match(candidate, query, station_id=station_id) for candidate in query_candidates
-            ):
-                break
 
         return collected, successful_requests
 
@@ -1013,56 +1039,61 @@ class StationLookupService:
             seen.add(key)
             queries.append(value.strip())
 
-        max_lookup_seed = max(1, STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS // 2)
-        for lookup_query in lookup_queries[:max_lookup_seed]:
-            add(lookup_query)
-            if len(queries) >= STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS:
-                return queries
-
-        folded_normalized = self._fold_german_umlauts(normalized).lower()
-        if folded_normalized and folded_normalized != normalized:
-            add(folded_normalized)
-            if len(queries) >= STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS:
-                return queries
-
         tokens = split_search_tokens(normalized)
         if not tokens:
-            return queries
+            add(normalized)
+            return queries[:STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS]
 
-        token_sets = [tokens]
+        folded_normalized = self._fold_german_umlauts(normalized).lower()
+        # Search parenthesized qualifiers first. A city or region often disambiguates
+        # otherwise similar brand and format names (for example, "Star FM (Berlin)").
+        qualifier_groups = re.findall(r"\(([^)]{2,80})\)", normalized)
+        for group in qualifier_groups:
+            qualifier_tokens = split_search_tokens(group)
+            if qualifier_tokens:
+                add(" ".join(qualifier_tokens))
+                for token in qualifier_tokens:
+                    add(token)
+
+        add(normalized)
         if folded_normalized and folded_normalized != normalized:
-            folded_tokens = split_search_tokens(folded_normalized)
-            if folded_tokens:
-                token_sets.append(folded_tokens)
+            add(folded_normalized)
 
-        for token_set in token_sets:
-            mapped_tokens = [STATION_LOOKUP_NUMBER_TOKEN_MAP.get(token, token) for token in token_set]
-            filtered_tokens = [
-                token
-                for token in mapped_tokens
-                if (
-                    token not in STATION_LOOKUP_IGNORED_TOKENS
-                    and token not in STATION_LOOKUP_SKIP_PREFIX_TOKENS
-                    and (
-                        len(token) >= STATION_LOOKUP_SEARCH_MIN_TOKEN_LENGTH
-                        or (token.isdigit() and len(token) >= 2)
-                        or self._is_significant_short_token(token)
-                    )
+        mapped_tokens = [STATION_LOOKUP_NUMBER_TOKEN_MAP.get(token, token) for token in tokens]
+        filtered_tokens = [
+            token
+            for token in mapped_tokens
+            if (
+                token not in STATION_LOOKUP_IGNORED_TOKENS
+                and token not in STATION_LOOKUP_SKIP_PREFIX_TOKENS
+                and (
+                    len(token) >= STATION_LOOKUP_SEARCH_MIN_TOKEN_LENGTH
+                    or (token.isdigit() and len(token) >= 2)
+                    or self._is_significant_short_token(token)
                 )
-            ]
-
-            if not filtered_tokens:
-                continue
-
+            )
+        ]
+        if filtered_tokens:
             add(" ".join(filtered_tokens))
-            if len(filtered_tokens) >= 2:
-                add(" ".join(filtered_tokens[-2:]))
-            if len(filtered_tokens) >= 3:
-                add(" ".join(filtered_tokens[-3:]))
+            # Preserve a possible compound brand such as "STAR FM" as an additional
+            # search key without concatenating the whole station name.
+            for left, right in zip(mapped_tokens, mapped_tokens[1:]):
+                if left.isalpha() and right.isalpha() and len(left) + len(right) >= 5:
+                    add(left + right)
             for token in filtered_tokens:
                 add(token)
                 if len(queries) >= STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS:
                     return queries
+            for size in (3, 2):
+                for start in range(0, len(filtered_tokens) - size + 1):
+                    add(" ".join(filtered_tokens[start : start + size]))
+                    if len(queries) >= STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS:
+                        return queries
+
+        for lookup_query in lookup_queries:
+            add(lookup_query)
+            if len(queries) >= STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS:
+                return queries
 
         return queries[:STATION_LOOKUP_SEARCH_MAX_QUERY_VARIANTS]
 
@@ -1136,6 +1167,121 @@ class StationLookupService:
         if self._has_strong_name_equivalence(station.name or "", query):
             return True
         return False
+
+    def _semantic_name_tokens(self, value: str) -> tuple[set[str], set[str]]:
+        """Return significant name words plus compact adjacent-word aliases."""
+        normalized = self._fold_german_umlauts(str(value or "").lower())
+        raw_tokens = split_search_tokens(normalized)
+        primary = {
+            STATION_LOOKUP_NUMBER_TOKEN_MAP.get(token, token)
+            for token in raw_tokens
+            if (
+                len(token) >= 3
+                or self._is_significant_short_token(token)
+                or (token.isdigit() and len(token) <= 2)
+            )
+        }
+        expanded = set(primary)
+        for left, right in zip(raw_tokens, raw_tokens[1:]):
+            if left.isalpha() and right.isalpha() and len(left) + len(right) >= 5:
+                expanded.add(left + right)
+        return primary, expanded
+
+    def _semantic_candidate_evidence(self, station: StationMatch, query: str) -> dict | None:
+        query_primary, query_expanded = self._semantic_name_tokens(query)
+        candidate_name_primary, _ = self._semantic_name_tokens(station.name)
+        if len(candidate_name_primary) < 2 or not candidate_name_primary.issubset(query_expanded):
+            return None
+
+        # Parenthesized values are treated as explicit qualifiers. They must occur in
+        # the station name or stream path, so a brand-only candidate cannot win.
+        qualifier_groups = re.findall(r"\(([^)]{2,80})\)", query)
+        qualifier_tokens = set()
+        for group in qualifier_groups:
+            group_primary, _ = self._semantic_name_tokens(group)
+            qualifier_tokens.update(group_primary)
+        stream_path = urlparse(station.stream_url or "").path
+        candidate_context_primary, _ = self._semantic_name_tokens(
+            f"{station.name} {unquote(stream_path)}"
+        )
+        if qualifier_tokens and not qualifier_tokens.issubset(candidate_context_primary):
+            return None
+
+        evidence = ["candidate_name_terms_covered"]
+        compact_aliases = candidate_name_primary & query_expanded
+        compound_matches = compact_aliases - query_primary
+        if compound_matches:
+            evidence.extend(f"compound_name:{token}" for token in sorted(compound_matches))
+        if qualifier_tokens:
+            evidence.extend(f"qualifier:{token}" for token in sorted(qualifier_tokens))
+
+        return {
+            "evidence": evidence,
+            "quality": (
+                int(self._compact_compare_key(station.name) == self._compact_compare_key(query)),
+                len(qualifier_tokens),
+                len(candidate_name_primary),
+            ),
+            "shared_name_terms": sorted(candidate_name_primary & query_expanded),
+        }
+
+    def _select_semantic_candidate(
+        self,
+        stations: list[StationMatch],
+        query: str,
+        station_id: str = "",
+    ) -> StationMatch | None:
+        evaluated = []
+        for station in stations:
+            details = self._semantic_candidate_evidence(station, query)
+            if not details and self._is_confident_station_match(station, query, station_id=station_id):
+                query_primary, query_expanded = self._semantic_name_tokens(query)
+                station_primary, _ = self._semantic_name_tokens(station.name)
+                query_qualifiers = set()
+                for group in re.findall(r"\(([^)]{2,80})\)", query):
+                    qualifier_primary, _ = self._semantic_name_tokens(group)
+                    query_qualifiers.update(qualifier_primary)
+                stream_path = urlparse(station.stream_url or "").path
+                context_primary, _ = self._semantic_name_tokens(f"{station.name} {unquote(stream_path)}")
+                details = {
+                    "evidence": ["strict_station_name_match"],
+                    "quality": (
+                        int(self._compact_compare_key(station.name) == self._compact_compare_key(query)),
+                        len(query_qualifiers & context_primary),
+                        len(station_primary & query_expanded),
+                    ),
+                }
+            if details:
+                evaluated.append((details["quality"], station, details))
+        if not evaluated:
+            return None
+
+        evaluated.sort(key=lambda item: item[0], reverse=True)
+        best_quality = evaluated[0][0]
+        tied = [item for item in evaluated if item[0] == best_quality]
+        if len(tied) > 1:
+            candidates = [
+                {
+                    "stationuuid": station.stationuuid,
+                    "name": station.name,
+                    "evidence": details["evidence"],
+                }
+                for _, station, details in tied[:5]
+            ]
+            raise StationLookupError(
+                "Mehrere Radio-Browser-Sender passen gleich gut zum Namen.",
+                error_class="station_ambiguous",
+                details={"match_candidates": candidates},
+            )
+
+        _, station, details = tied[0]
+        station.match_method = (
+            "semantic_name_tokens"
+            if "candidate_name_terms_covered" in details["evidence"]
+            else "strict_name_tokens"
+        )
+        station.match_evidence = list(details["evidence"])
+        return station
 
     def _has_optional_trailing_region_suffix(
         self,

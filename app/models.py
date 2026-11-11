@@ -43,6 +43,8 @@ class StationMatch:
     votes: int
     lastcheckok: int
     raw_record: dict[str, Any] = field(default_factory=dict)
+    match_method: str = ""
+    match_evidence: list[str] = field(default_factory=list)
 
 
 @dataclass

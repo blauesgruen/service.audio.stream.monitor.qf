@@ -117,7 +117,8 @@ Wichtig:
 
 - ermittelt Radio-Browser-Mirrors dynamisch ueber `all.api.radio-browser.info` und verteilt Requests zufaellig auf die gefundenen Hosts
 - erzeugt Lookup- und Slug-Varianten aus generischen Token-Fenstern (keine sender-festen Regeln)
-- dedupliziert und scored Kandidaten
+- dedupliziert Kandidaten und bewertet sie regelbasiert anhand ueberdeckter Namenstoken und expliziter Qualifier wie Ortsangaben in Klammern
+- akzeptiert den semantischen Fallback nur bei einem eindeutig besten Kandidaten; Gleichstaende liefern `station_ambiguous`
 - Web-Fallback prueft mehrere Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`)
 - `find_by_id(...)` akzeptiert echte UUIDs und stabile Slugs; bei Miss kann derselbe Web-Fallback direkt auf der ID greifen
 
@@ -384,6 +385,7 @@ Semantik `StationUsed`:
 
 - ASM-QF liefert den sanitisierten Wert in `response.meta.station_used`
 - `response.meta.error_class` unterscheidet unter anderem `station_not_found`, `dns_error`, `station_lookup_unavailable` und `song_not_recognized`
+- `response.meta.match_method` und `response.meta.match_evidence` dokumentieren Methode und Belege eines semantischen Namens-Treffers
 - ASM uebernimmt diesen Wert und setzt sein eigenes Runtime-Label im ASM-Namespace
 - damit bleibt der QF-Response-Contract schlank und ohne eigenes `Response.StationUsed`-Property
 - der Wert kann bei Fehler-/Blocked-/Abbruchpfaden leer sein

@@ -2,7 +2,10 @@
 
 ## 2026-11-11
 
-- ASM-QF-Version auf `0.1.8` erhoeht.
+- ASM-QF-Version auf `0.1.9` erhoeht.
+- Senderkandidaten koennen regelbasiert ueber zusammengesetzte Markennamen und explizite Qualifier wie Klammer-Orte abgeglichen werden.
+- Der semantische Fallback waehlt nur einen eindeutig besten Kandidaten; Gleichstaende werden als `station_ambiguous` gemeldet.
+- `Response.Meta` dokumentiert `match_method` und `match_evidence`; fuer die Suche wird keine KI verwendet.
 - Radio-Browser-Server werden dynamisch ueber `all.api.radio-browser.info` ermittelt statt fest eingetragen.
 - „Sender nicht gefunden“ wird von DNS- und allgemeinen Serverfehlern getrennt; die Fehlerklasse steht in `Response.Meta.error_class`.
 - Station-ID-Slugs wie `starfmberlin` werden als Namenssuche ausgewertet und nicht als UUID behandelt.

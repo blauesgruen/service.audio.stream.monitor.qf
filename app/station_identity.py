@@ -95,6 +95,8 @@ def find_station_by_name_with_fallback(
             last_error = err
             if on_variant_failed:
                 on_variant_failed(variant, err)
+            if getattr(err, "error_class", "") == "station_ambiguous":
+                raise
 
     raise last_error if last_error else ValueError("Kein passender Sender gefunden.")
 

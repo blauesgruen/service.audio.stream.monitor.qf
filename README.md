@@ -7,6 +7,7 @@ Python-Tool mit GUI zur Analyse von Internet-Radio-URLs.
 - Optionaler `Station-ID`-/Slug-Hinweis in GUI und Kodi-Bridge als stabiler Fallback fuer den Sender-Lookup
 - Automatische Sender-Suche per Name (Radio-Browser API)
 - Sendernamen-Lookup mit generischen Token-Varianten (z. B. Teilphrasen), ohne sender-spezifische Sonderfaelle
+- Regelbasierter Namensabgleich mit zusammengesetzten Marken und expliziten Qualifiern; mehrdeutige Senderkandidaten werden abgelehnt
 - Name-First-Lookup mit optionalem `Station-ID`-/Slug-Fallback fuer Radio-Browser-UUIDs oder stabile Slugs, inkl. zusaetzlichem Web-Directory-Fallback
 - Auflösung zur Original-Stream-Quelle (Redirects + `m3u`/`pls`/`xspf`)
 - HLS-Media-Playlists ohne weitere Variant-URL werden als gueltiger Stream-Endpunkt akzeptiert

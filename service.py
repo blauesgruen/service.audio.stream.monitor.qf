@@ -1514,6 +1514,7 @@ class QFBridgeService(xbmc.Monitor):
         phase_timings = {}
         verified_fastpath_state = "disabled"
         lookup_error_class = "station_not_found"
+        lookup_error_details = {}
 
         def _mark_phase(name, started_at):
             if not self.QF_TELEMETRY_ENABLED:
@@ -1604,6 +1605,7 @@ class QFBridgeService(xbmc.Monitor):
                     stream_seed = station.stream_url
                 except Exception as err:
                     lookup_error_class = getattr(err, "error_class", "station_lookup_unavailable")
+                    lookup_error_details = dict(getattr(err, "details", {}) or {})
                     self.logger.warning("station_lookup_failed", station=station_input, station_id=station_id_norm, error=str(err))
                     if not self.is_probable_url(station_input):
                         stream_seed = ""
@@ -1613,17 +1615,24 @@ class QFBridgeService(xbmc.Monitor):
                     stream_seed = station.stream_url
                 except Exception as err:
                     lookup_error_class = getattr(err, "error_class", "station_lookup_unavailable")
+                    lookup_error_details = dict(getattr(err, "details", {}) or {})
                     self.logger.warning("station_lookup_failed", station=station_input, error=str(err))
                     stream_seed = ""
 
             stream_seed = str(stream_seed or "").strip()
             if not stream_seed:
-                no_seed_reason = "station_not_found" if lookup_error_class == "station_not_found" else "station_lookup_failed"
+                if lookup_error_class == "station_not_found":
+                    no_seed_reason = "station_not_found"
+                elif lookup_error_class == "station_ambiguous":
+                    no_seed_reason = "station_ambiguous"
+                else:
+                    no_seed_reason = "station_lookup_failed"
                 no_seed_meta = {
                     "station": station.name if station else station_input,
                     "station_id": station_id_value,
                     "error_class": lookup_error_class,
                 }
+                no_seed_meta.update(lookup_error_details)
                 if station_id_norm and not station_input:
                     no_seed_meta["lookup_mode"] = "station_id_only"
                 return {
@@ -1661,6 +1670,9 @@ class QFBridgeService(xbmc.Monitor):
             "resolved_url": resolved.resolved_url,
             "delivery_url": resolved.delivery_url or "",
         }
+        if station and station.match_method:
+            meta["match_method"] = station.match_method
+            meta["match_evidence"] = list(station.match_evidence)
 
         station_name = station.name if station else station_input
         station_slug = ""
