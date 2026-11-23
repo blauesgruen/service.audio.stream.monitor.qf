@@ -1225,6 +1225,15 @@ class StationLookupService:
             "shared_name_terms": sorted(candidate_name_primary & query_expanded),
         }
 
+    def _same_operator_entries(self, stations: list[StationMatch]) -> bool:
+        """True if all stations share one name and one non-empty homepage host."""
+        names = {self._compact_compare_key(s.name) for s in stations}
+        hosts = {
+            (urlparse(s.homepage or "").hostname or "").lower().removeprefix("www.")
+            for s in stations
+        }
+        return len(names) == 1 and len(hosts) == 1 and "" not in hosts
+
     def _select_semantic_candidate(
         self,
         stations: list[StationMatch],
@@ -1260,14 +1269,42 @@ class StationLookupService:
         best_quality = evaluated[0][0]
         tied = [item for item in evaluated if item[0] == best_quality]
         if len(tied) > 1:
+            # Same name + same operator homepage = duplicate stream entries of one
+            # station; only then may status/votes/bitrate break the tie.
+            same_operator = self._same_operator_entries([station for _, station, _ in tied])
+            if same_operator:
+                tied.sort(
+                    key=lambda item: (
+                        int(item[1].lastcheckok or 0),
+                        int(item[1].votes or 0),
+                        int(item[1].bitrate or 0),
+                    ),
+                    reverse=True,
+                )
+                tied = tied[:1]
+                tied[0][2]["evidence"].append("same_operator_duplicate_best_stream")
+        if len(tied) > 1:
             candidates = [
                 {
                     "stationuuid": station.stationuuid,
                     "name": station.name,
+                    "homepage": station.homepage,
+                    "stream_url": station.stream_url,
+                    "lastcheckok": station.lastcheckok,
+                    "votes": station.votes,
+                    "bitrate": station.bitrate,
                     "evidence": details["evidence"],
                 }
                 for _, station, details in tied[:5]
             ]
+            self._log(
+                "Sender mehrdeutig, Kandidaten: "
+                + " | ".join(
+                    f"{c['name']} uuid={c['stationuuid']} homepage={c['homepage'] or '-'} "
+                    f"ok={c['lastcheckok']} votes={c['votes']} evidence={','.join(c['evidence'])}"
+                    for c in candidates
+                )
+            )
             raise StationLookupError(
                 "Mehrere Radio-Browser-Sender passen gleich gut zum Namen.",
                 error_class="station_ambiguous",

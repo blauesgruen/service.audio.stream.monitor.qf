@@ -1157,6 +1157,50 @@ class QFBridgeService(xbmc.Monitor):
             """
         )
 
+    def _load_station_uuid(self, station_key):
+        if not station_key:
+            return ""
+        try:
+            conn = sqlite3.connect(self._get_qf_db_path(), timeout=2.0)
+            try:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS station_uuid_map ("
+                    "station_key TEXT PRIMARY KEY, stationuuid TEXT NOT NULL, updated_ts INTEGER NOT NULL DEFAULT 0)"
+                )
+                row = conn.execute(
+                    "SELECT stationuuid FROM station_uuid_map WHERE station_key=?", (station_key,)
+                ).fetchone()
+            finally:
+                conn.close()
+            return str(row[0]) if row else ""
+        except Exception as err:
+            self.logger.debug("station_uuid_map_load_failed", message=str(err))
+            return ""
+
+    def _save_station_uuid(self, station_key, station):
+        uuid = str(getattr(station, "stationuuid", "") or "").strip()
+        if not station_key or not uuid:
+            return
+        try:
+            db_path = self._get_qf_db_path()
+            os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+            conn = sqlite3.connect(db_path, timeout=2.0)
+            try:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS station_uuid_map ("
+                    "station_key TEXT PRIMARY KEY, stationuuid TEXT NOT NULL, updated_ts INTEGER NOT NULL DEFAULT 0)"
+                )
+                conn.execute(
+                    "INSERT INTO station_uuid_map (station_key, stationuuid, updated_ts) VALUES (?, ?, ?) "
+                    "ON CONFLICT(station_key) DO UPDATE SET stationuuid=excluded.stationuuid, updated_ts=excluded.updated_ts",
+                    (station_key, uuid, int(time.time())),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as err:
+            self.logger.debug("station_uuid_map_save_failed", message=str(err))
+
     def _reset_stream_verify_state(self, state):
         if not isinstance(state, dict):
             return
@@ -1610,13 +1654,28 @@ class QFBridgeService(xbmc.Monitor):
                     if not self.is_probable_url(station_input):
                         stream_seed = ""
             elif not self.is_probable_url(station_input) and station_input:
+                name_key = self._build_station_key(station_input)
                 try:
-                    station = self._find_station_by_name_with_fallback(lookup, station_input)
+                    mapped_uuid = self._load_station_uuid(name_key)
+                    if mapped_uuid:
+                        try:
+                            station = lookup.find_by_id(mapped_uuid)
+                            self.logger.debug("station_uuid_map_hit", station_key=name_key, uuid=mapped_uuid)
+                        except Exception as map_err:
+                            self.logger.warning("station_uuid_map_stale", station_key=name_key, error=str(map_err))
+                    if not station:
+                        station = self._find_station_by_name_with_fallback(lookup, station_input)
+                        self._save_station_uuid(name_key, station)
                     stream_seed = station.stream_url
                 except Exception as err:
                     lookup_error_class = getattr(err, "error_class", "station_lookup_unavailable")
                     lookup_error_details = dict(getattr(err, "details", {}) or {})
-                    self.logger.warning("station_lookup_failed", station=station_input, error=str(err))
+                    self.logger.warning(
+                        "station_lookup_failed",
+                        station=station_input,
+                        error=str(err),
+                        **({"match_candidates": lookup_error_details["match_candidates"]} if lookup_error_details.get("match_candidates") else {}),
+                    )
                     stream_seed = ""
 
             stream_seed = str(stream_seed or "").strip()
