@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-23
+
+- ASM-QF-Version auf `0.1.10` erhoeht.
+- Bei gleich bewerteten Senderkandidaten mit identischem Namen und identischer Betreiber-Homepage entscheiden `lastcheckok`, `votes` und `bitrate`; bei verschiedenen Betreibern bleibt `station_ambiguous` erhalten.
+- Neue Tabelle `station_uuid_map` in `song_data.db` speichert die aufgeloeste Radio-Browser-UUID je Sender-Key und nutzt sie bei Namensanfragen vor der Suche (PVR-Radio ohne Station-ID).
+- Bei `station_ambiguous` werden `match_candidates` (Name, UUID, Homepage, Stream-URL, Status, Votes, Bitrate, Evidence) geloggt und im Event `station_lookup_failed` ausgegeben.
+
 ## 2026-11-11
 
 - ASM-QF-Version auf `0.1.9` erhoeht.
