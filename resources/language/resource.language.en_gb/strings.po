@@ -18,3 +18,83 @@ msgstr "Enable ASM-QF bridge"
 msgctxt "#32051"
 msgid "Searches the web for official station origin sources (source finder). Can provide additional song metadata."
 msgstr "If disabled, requests are answered with status 'blocked'."
+
+msgctxt "#32100"
+msgid "ASM-QF - Sender zuordnen"
+msgstr ""
+
+msgctxt "#32101"
+msgid "Several possible programs were found for %s.[CR]Please choose the station you are receiving:"
+msgstr ""
+
+msgctxt "#32102"
+msgid "Remember this choice for this station"
+msgstr ""
+
+msgctxt "#32103"
+msgid "Cancel"
+msgstr ""
+
+msgctxt "#32104"
+msgid "Apply"
+msgstr ""
+
+msgctxt "#32110"
+msgid "Station assignment"
+msgstr ""
+
+msgctxt "#32111"
+msgid "Assign current station"
+msgstr ""
+
+msgctxt "#32112"
+msgid "Show current assignment"
+msgstr ""
+
+msgctxt "#32113"
+msgid "Manage saved assignments"
+msgstr ""
+
+msgctxt "#32114"
+msgid "No station is playing"
+msgstr ""
+
+msgctxt "#32115"
+msgid "No candidates found"
+msgstr ""
+
+msgctxt "#32116"
+msgid "Assignment saved"
+msgstr ""
+
+msgctxt "#32117"
+msgid "Assignment deleted"
+msgstr ""
+
+msgctxt "#32118"
+msgid "Delete this assignment?"
+msgstr ""
+
+msgctxt "#32119"
+msgid "No saved assignments"
+msgstr ""
+
+msgctxt "#32120"
+msgid "Station: %s[CR]Assignment: %s"
+msgstr ""
+
+msgctxt "#32121"
+msgid "none saved"
+msgstr ""
+
+msgctxt "#32122"
+msgid "unconfirmed (taken over automatically)"
+msgstr ""
+
+msgctxt "#32123"
+msgid "confirmed by user"
+msgstr ""
+
+msgctxt "#32124"
+msgid "confirmed technically"
+msgstr ""

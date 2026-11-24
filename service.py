@@ -3,6 +3,7 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 import time
 import traceback
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -31,6 +32,9 @@ RES_META = "RadioMonitor.QF.Response.Meta"
 RES_TS = "RadioMonitor.QF.Response.Ts"
 RES_FOR_REQ_ID = "RadioMonitor.QF.Response.ForReqId"
 
+# Command channel from manage.py (separate interpreter): "assign" or "invalidate:<station_key>".
+MANUAL_CMD = "RadioMonitor.QF.Manual.Command"
+
 QF_ADDON_ID = "service.audio.stream.monitor.qf"
 QF_VERIFIED_SOURCE_KIND = "qf_verified"
 
@@ -50,6 +54,13 @@ def _translate_path(path_value):
             return xbmc.translatePath(value)
         except Exception:
             return value
+
+
+class _SelectionCancelled(Exception):
+    """User cancelled the station selection for the current playback."""
+
+    error_class = "station_selection_cancelled"
+    details = {"station_selection": "cancelled"}
 
 
 class QFLogger:
@@ -147,6 +158,9 @@ class QFBridgeService(xbmc.Monitor):
         self.QF_FEED_RETRY_LONG_GAP_SECONDS = 25.0
         self._verified_source_repo = None
         self._result_cache: dict[str, dict] = {}
+        self._selection_registry = None
+        self._selection_applied: dict[str, str] = {}
+        self._selection_dialog = None  # (name_key, dialog) while open
         self._lookup_service = None
         self._resolver_service = None
         self._fetcher_service = None
@@ -835,6 +849,10 @@ class QFBridgeService(xbmc.Monitor):
             _, _, fetcher, discovery = self._get_core_services()
 
         candidate_meta = candidate.get("meta") if isinstance(candidate, dict) else {}
+        identity_gate = self._verified_source_identity_gate(key, candidate_meta)
+        if identity_gate:
+            self.logger.debug("verified_source_fastpath_identity_gate", station_key=key, state=identity_gate)
+            return None, identity_gate
         candidate_kind = self._classify_verified_source_fastpath_kind(
             verified_source_url,
             meta=candidate_meta,
@@ -1157,49 +1175,303 @@ class QFBridgeService(xbmc.Monitor):
             """
         )
 
-    def _load_station_uuid(self, station_key):
-        if not station_key:
-            return ""
+    # ---- Station identity mapping (trust-aware; see app/station_mapping.py) ----
+
+    def _load_station_mapping(self, source_key):
+        """Return the stored mapping for a source key, or None. Never raises."""
+        if not source_key:
+            return None
+        try:
+            from app import station_mapping as sm
+
+            return sm.load_mapping(self._get_qf_db_path(), "name", source_key)
+        except Exception as err:
+            self.logger.debug("station_mapping_load_failed", message=str(err))
+            return None
+
+    def _save_confirmed_station_mapping(self, source_key, station, confirmation_source, save_preference=True):
+        """Persist ONLY user/technical confirmations. Provisional candidates are never saved."""
+        uuid = str(getattr(station, "stationuuid", "") or "").strip()
+        if not source_key or not uuid:
+            return False
+        try:
+            from app import station_mapping as sm
+
+            saved = sm.save_mapping(
+                self._get_qf_db_path(),
+                "name",
+                source_key,
+                uuid,
+                station_name=str(getattr(station, "name", "") or ""),
+                confirmation_source=confirmation_source,
+                save_preference=save_preference,
+            )
+            if saved:
+                self.logger.info(
+                    "station_mapping_saved",
+                    source_key=source_key,
+                    station=getattr(station, "name", ""),
+                    uuid=uuid,
+                    confirmation_source=confirmation_source,
+                )
+            return saved
+        except Exception as err:
+            self.logger.warning("station_mapping_save_failed", message=str(err))
+            return False
+
+    def _invalidate_station_mapping(self, source_key, reason):
+        try:
+            from app import station_mapping as sm
+
+            sm.delete_mapping(self._get_qf_db_path(), "name", source_key)
+            self.logger.warning("station_mapping_invalidated", source_key=source_key, reason=reason)
+        except Exception as err:
+            self.logger.debug("station_mapping_invalidate_failed", message=str(err))
+
+    # ---- Manual assignment / management (commands from manage.py) ----
+
+    def _notify(self, string_id, fallback=""):
+        try:
+            text = self.addon.getLocalizedString(string_id) or fallback
+            xbmcgui.Dialog().notification("ASM-QF", text, xbmcgui.NOTIFICATION_INFO, 4000)
+        except Exception as err:
+            self.logger.debug("notify_failed", message=str(err))
+
+    def _manual_assign_current_station(self):
+        """Open the assignment dialog for the current station, even if a mapping exists."""
+        station = (WINDOW.getProperty(REQ_STATION) or "").strip()
+        if not station:
+            self._notify(32114, "No active station")
+            return
+        if not self._ensure_imports():
+            return
+        name_key = self._build_station_key(station)
+        self._note_request_station(name_key, station)
+        self.logger.info("station_manual_assign_requested", source_key=name_key, station=station)
+        try:
+            lookup = self._get_core_services()[0]
+            candidates = lookup.collect_program_candidates(station)
+        except Exception as err:
+            self.logger.warning("station_manual_candidates_failed", station=station, error=str(err))
+            candidates = []
+        candidates = self._sanitize_lookup_error_details({"match_candidates": candidates}).get("match_candidates") or []
+        if not candidates:
+            self._notify(32115, "No candidates found")
+            return
+        mapping = self._load_station_mapping(name_key)
+        if mapping and mapping.get("confirmation_source") in ("user", "technical"):
+            current = str(mapping.get("stationuuid") or "")
+            candidates.sort(key=lambda c: 0 if str(c.get("stationuuid")) == current else 1)
+        if not self._get_selection_registry().force_pending(name_key, candidates):
+            return  # dialog already open
+        self._run_selection_dialog(name_key, station, candidates)
+
+    def _manual_invalidate(self, name_key):
+        """A mapping was deleted/changed externally: forget derived state for that station."""
+        name_key = str(name_key or "").strip()
+        if not name_key:
+            return
+        self._get_selection_registry().clear(name_key)
+        self._selection_applied.pop(name_key, None)
+        for key in [k for k in self._resolution_cache if k == name_key or k.startswith(name_key)]:
+            self._resolution_cache.pop(key, None)
+        self._result_cache.pop(name_key, None)
         try:
             conn = sqlite3.connect(self._get_qf_db_path(), timeout=2.0)
             try:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS station_uuid_map ("
-                    "station_key TEXT PRIMARY KEY, stationuuid TEXT NOT NULL, updated_ts INTEGER NOT NULL DEFAULT 0)"
-                )
-                row = conn.execute(
-                    "SELECT stationuuid FROM station_uuid_map WHERE station_key=?", (station_key,)
-                ).fetchone()
-            finally:
-                conn.close()
-            return str(row[0]) if row else ""
-        except Exception as err:
-            self.logger.debug("station_uuid_map_load_failed", message=str(err))
-            return ""
-
-    def _save_station_uuid(self, station_key, station):
-        uuid = str(getattr(station, "stationuuid", "") or "").strip()
-        if not station_key or not uuid:
-            return
-        try:
-            db_path = self._get_qf_db_path()
-            os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-            conn = sqlite3.connect(db_path, timeout=2.0)
-            try:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS station_uuid_map ("
-                    "station_key TEXT PRIMARY KEY, stationuuid TEXT NOT NULL, updated_ts INTEGER NOT NULL DEFAULT 0)"
-                )
-                conn.execute(
-                    "INSERT INTO station_uuid_map (station_key, stationuuid, updated_ts) VALUES (?, ?, ?) "
-                    "ON CONFLICT(station_key) DO UPDATE SET stationuuid=excluded.stationuuid, updated_ts=excluded.updated_ts",
-                    (station_key, uuid, int(time.time())),
-                )
+                conn.execute("DELETE FROM verified_station_sources WHERE station_key=?", (name_key,))
                 conn.commit()
             finally:
                 conn.close()
         except Exception as err:
-            self.logger.debug("station_uuid_map_save_failed", message=str(err))
+            self.logger.debug("verified_sources_purge_failed", message=str(err))
+        self.logger.info("station_mapping_invalidated", source_key=name_key, reason="manual_change")
+
+    def _handle_manual_command(self):
+        command = (WINDOW.getProperty(MANUAL_CMD) or "").strip()
+        if not command:
+            return
+        WINDOW.clearProperty(MANUAL_CMD)
+        if command == "assign":
+            threading.Thread(
+                target=self._manual_assign_current_station, name="qf-manual-assign", daemon=True
+            ).start()
+        elif command.startswith("invalidate:"):
+            self._manual_invalidate(command[len("invalidate:"):])
+
+    # ---- Interactive station selection (dialog runs in its own thread) ----
+
+    def _get_selection_registry(self):
+        if self._selection_registry is None:
+            from app.selection_state import SelectionRegistry
+
+            self._selection_registry = SelectionRegistry()
+        return self._selection_registry
+
+    def _note_request_station(self, name_key, station_input=""):
+        """Track the active station; a station change makes older dialogs/decisions stale."""
+        if not name_key:
+            return
+        registry = self._get_selection_registry()
+        stale_key = registry.on_request(name_key)
+        if stale_key:
+            self._selection_applied.pop(stale_key, None)
+        # A decision may land while a request is still running (which then re-fills the
+        # caches with the old guess). Drop those caches once per decision, at request start.
+        state = registry.get(name_key) or {}
+        marker = f"{state.get('state', '')}:{state.get('stationuuid', '')}"
+        if state.get("state") in ("chosen", "cancelled") and self._selection_applied.get(name_key) != marker:
+            self._selection_applied[name_key] = marker
+            self._invalidate_station_caches(station_input, name_key)
+        if stale_key:
+            entry = self._selection_dialog
+            if entry and entry[0] == stale_key:
+                self.logger.info("station_selection_discarded", source_key=stale_key, reason="station_changed")
+                try:
+                    entry[1].close()
+                except Exception as err:
+                    self.logger.debug("station_selection_close_failed", message=str(err))
+
+    def _invalidate_station_caches(self, station_input, name_key):
+        try:
+            self._resolution_cache.pop(self._build_resolution_cache_key(station_input), None)
+            self._result_cache.pop(name_key, None)
+        except Exception as err:
+            self.logger.debug("station_cache_invalidate_failed", message=str(err))
+
+    def _request_station_selection(self, name_key, station_input, candidates):
+        """Ask the user once per playback. Never blocks the request loop."""
+        usable = [c for c in (candidates or []) if str(c.get("stationuuid") or "").strip()]
+        self.logger.info(
+            "station_selection_required",
+            source_key=name_key,
+            station=station_input,
+            candidates=len(usable),
+            names="|".join(str(c.get("name") or "") for c in usable[:8]),
+        )
+        if len(usable) < 2:
+            return
+        if not self._get_selection_registry().begin_pending(name_key, usable):
+            return  # already pending/decided in this playback: polling must not reopen it
+        thread = threading.Thread(
+            target=self._run_selection_dialog,
+            args=(name_key, station_input, usable),
+            name="qf-station-selection",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_selection_dialog(self, name_key, station_input, candidates):
+        registry = self._get_selection_registry()
+        result = None
+        try:
+            import importlib
+
+            import qf_selection_dialog
+
+            # The service lives for the whole Kodi session; reload so dialog code updates apply.
+            importlib.reload(qf_selection_dialog)
+            dialog = qf_selection_dialog.open_dialog(self._get_project_root(), station_input, candidates)
+            self._selection_dialog = (name_key, dialog)
+            self.logger.info("station_selection_opened", source_key=name_key, station=station_input)
+            dialog.doModal()
+            result = dialog.result
+            del dialog
+        except Exception as err:
+            self.logger.error("station_selection_failed", source_key=name_key, error=str(err))
+        finally:
+            self._selection_dialog = None
+
+        if result and result.get("stationuuid"):
+            uuid = str(result["stationuuid"])
+            save = bool(result.get("save"))
+            if registry.choose(name_key, uuid, save):
+                chosen = next((c for c in candidates if str(c.get("stationuuid")) == uuid), {})
+                self.logger.info(
+                    "station_selection_confirmed",
+                    source_key=name_key,
+                    uuid=uuid,
+                    station=chosen.get("name", ""),
+                    save=save,
+                )
+                if save:
+                    class _Chosen:
+                        stationuuid = uuid
+                        name = str(chosen.get("name") or "")
+
+                    self._save_confirmed_station_mapping(name_key, _Chosen, "user", save_preference=True)
+                self._invalidate_station_caches(station_input, name_key)
+                if save:
+                    self._notify(32116, "Assignment saved")
+        elif registry.cancel(name_key):
+            self.logger.info("station_selection_cancelled", source_key=name_key)
+            self._invalidate_station_caches(station_input, name_key)
+
+    def _sanitize_lookup_error_details(self, details):
+        """Copy error details for logs/response meta; stream URLs lose query/userinfo."""
+        from app.station_identity_trust import redact_url
+
+        clean = dict(details or {})
+        candidates = []
+        for item in clean.get("match_candidates") or []:
+            entry = dict(item)
+            entry["stream_url"] = redact_url(entry.get("stream_url", ""))
+            candidates.append(entry)
+        if candidates:
+            clean["match_candidates"] = candidates
+        return clean
+
+    def _identity_meta(self, station):
+        """Identity facts for response/verified-source meta (no URLs, no tokens)."""
+        if station is None:
+            return {}
+        candidates = []
+        for item in list(getattr(station, "identity_candidates", []) or [])[:8]:
+            candidates.append(
+                {
+                    "stationuuid": item.get("stationuuid", ""),
+                    "name": item.get("name", ""),
+                    "channel_key": item.get("channel_key", ""),
+                    "variants": item.get("variants", 1),
+                }
+            )
+        return {
+            "identity_tier": getattr(station, "identity_tier", "") or "",
+            "identity_uuid": getattr(station, "stationuuid", "") or "",
+            "identity_confirmation": getattr(station, "identity_confirmation", "") or "",
+            "identity_reasons": list(getattr(station, "identity_reasons", []) or []),
+            "identity_candidates": candidates,
+        }
+
+    def _verified_source_identity_gate(self, station_key, candidate_meta):
+        """Fastpath must not serve a source recorded for another program than the confirmed one.
+
+        Only name-based keys are affected (URL/stationid keys already identify the station).
+        Returns "" if the verified source may be used, else a `resolve_*` state that forces
+        full resolution (which also bypasses the result cache).
+
+        TODO(dialog phase): once tier B withholds results until the user selects, also block
+        sources recorded with an unconfirmed tier B identity. Until then blocking would only
+        cost speed, because the best guess is shown either way.
+        """
+        if not str(station_key or "").startswith("name:"):
+            return ""
+        selection = self._get_selection_registry().get(station_key)
+        if selection and selection.get("state") == "cancelled":
+            return "resolve_selection_cancelled"
+        meta0 = candidate_meta if isinstance(candidate_meta, dict) else {}
+        if selection and selection.get("state") == "chosen":
+            if str(meta0.get("identity_uuid") or "") != str(selection.get("stationuuid") or ""):
+                return "resolve_identity_mismatch"
+            return ""
+        mapping = self._load_station_mapping(station_key)
+        if not (mapping and mapping.get("confirmation_source") in ("user", "technical")):
+            return ""
+        meta = candidate_meta if isinstance(candidate_meta, dict) else {}
+        recorded_uuid = str(meta.get("identity_uuid") or "").strip()
+        if recorded_uuid and recorded_uuid == str(mapping.get("stationuuid") or ""):
+            return ""
+        return "resolve_identity_mismatch"
 
     def _reset_stream_verify_state(self, state):
         if not isinstance(state, dict):
@@ -1218,6 +1490,7 @@ class QFBridgeService(xbmc.Monitor):
         resolved,
         song,
         source_approval,
+        identity_meta=None,
     ):
         if not song:
             return False
@@ -1320,6 +1593,11 @@ class QFBridgeService(xbmc.Monitor):
                 "resolved_url": resolved_url,
                 "delivery_url": delivery_url or "",
                 "verification_policy": verification_policy,
+                **{
+                    key: value
+                    for key, value in dict(identity_meta or {}).items()
+                    if key in ("identity_tier", "identity_uuid", "identity_confirmation")
+                },
             },
         )
 
@@ -1656,20 +1934,69 @@ class QFBridgeService(xbmc.Monitor):
             elif not self.is_probable_url(station_input) and station_input:
                 name_key = self._build_station_key(station_input)
                 try:
-                    mapped_uuid = self._load_station_uuid(name_key)
-                    if mapped_uuid:
+                    mapping = self._load_station_mapping(name_key)
+                    session_choice = self._get_selection_registry().get(name_key)
+                    session_chosen = bool(session_choice and session_choice.get("state") == "chosen")
+                    if (
+                        mapping
+                        and mapping.get("confirmation_source") in ("user", "technical")
+                        and not session_chosen
+                    ):
+                        mapped_uuid = str(mapping.get("stationuuid") or "")
                         try:
                             station = lookup.find_by_id(mapped_uuid)
-                            self.logger.debug("station_uuid_map_hit", station_key=name_key, uuid=mapped_uuid)
+                            station.identity_tier = "A"
+                            station.identity_confirmation = str(mapping.get("confirmation_source") or "")
+                            station.identity_reasons = ["confirmed_mapping"]
+                            self.logger.info(
+                                "station_mapping_loaded",
+                                source_key=name_key,
+                                uuid=mapped_uuid,
+                                confirmation_source=station.identity_confirmation,
+                            )
                         except Exception as map_err:
-                            self.logger.warning("station_uuid_map_stale", station_key=name_key, error=str(map_err))
+                            self._invalidate_station_mapping(name_key, "radio_browser_uuid_invalid: " + str(map_err))
+                    selection = self._get_selection_registry().get(name_key)
+                    if not station and selection and selection.get("state") == "cancelled":
+                        raise _SelectionCancelled()
+                    if not station and selection and selection.get("state") == "chosen":
+                        station = lookup.find_by_id(str(selection.get("stationuuid") or ""))
+                        station.identity_tier = "A"
+                        station.identity_confirmation = "user"
+                        station.identity_reasons = ["user_selection_session"]
+                        self.logger.info("station_selection_applied", source_key=name_key, uuid=station.stationuuid)
                     if not station:
-                        station = self._find_station_by_name_with_fallback(lookup, station_input)
-                        self._save_station_uuid(name_key, station)
+                        try:
+                            station = self._find_station_by_name_with_fallback(lookup, station_input)
+                        except Exception as find_err:
+                            if getattr(find_err, "error_class", "") == "station_ambiguous":
+                                find_details = self._sanitize_lookup_error_details(getattr(find_err, "details", {}))
+                                self._request_station_selection(
+                                    name_key, station_input, find_details.get("match_candidates")
+                                )
+                            raise
+                        tier = getattr(station, "identity_tier", "") or ""
+                        log_event = "station_identity_confirmed" if tier == "A" else "station_identity_ambiguous"
+                        self.logger.info(
+                            log_event,
+                            station=station_input,
+                            selected=station.name,
+                            uuid=station.stationuuid,
+                            tier=tier,
+                            reasons=",".join(getattr(station, "identity_reasons", []) or []),
+                            candidates=len(getattr(station, "identity_candidates", []) or []),
+                            legacy_mapping_ignored=bool(mapping),
+                        )
+                        # NOTE: no persistence here. Automatic results are provisional;
+                        # only user/technical confirmations are saved.
+                        if tier == "B":
+                            self._request_station_selection(
+                                name_key, station_input, getattr(station, "identity_candidates", [])
+                            )
                     stream_seed = station.stream_url
                 except Exception as err:
                     lookup_error_class = getattr(err, "error_class", "station_lookup_unavailable")
-                    lookup_error_details = dict(getattr(err, "details", {}) or {})
+                    lookup_error_details = self._sanitize_lookup_error_details(getattr(err, "details", {}))
                     self.logger.warning(
                         "station_lookup_failed",
                         station=station_input,
@@ -1684,6 +2011,8 @@ class QFBridgeService(xbmc.Monitor):
                     no_seed_reason = "station_not_found"
                 elif lookup_error_class == "station_ambiguous":
                     no_seed_reason = "station_ambiguous"
+                elif lookup_error_class == "station_selection_cancelled":
+                    no_seed_reason = "station_selection_cancelled"
                 else:
                     no_seed_reason = "station_lookup_failed"
                 no_seed_meta = {
@@ -1732,6 +2061,9 @@ class QFBridgeService(xbmc.Monitor):
         if station and station.match_method:
             meta["match_method"] = station.match_method
             meta["match_evidence"] = list(station.match_evidence)
+        if station and getattr(station, "identity_tier", ""):
+            meta.update(self._identity_meta(station))
+            meta["station_selection_required"] = station.identity_tier != "A"
 
         station_name = station.name if station else station_input
         station_slug = ""
@@ -1821,6 +2153,7 @@ class QFBridgeService(xbmc.Monitor):
                     resolved=resolved,
                     song=feed_song,
                     source_approval=approval,
+                    identity_meta=self._identity_meta(station),
                 )
                 return {
                     "status": "hit",
@@ -1877,6 +2210,7 @@ class QFBridgeService(xbmc.Monitor):
                     resolved=resolved,
                     song=stream_song,
                     source_approval=approval,
+                    identity_meta=self._identity_meta(station),
                 )
                 return {
                     "status": "hit",
@@ -2028,6 +2362,7 @@ class QFBridgeService(xbmc.Monitor):
 
         station_name = (station or "").strip()
         station_key = self._build_station_key(station_name, station_id=station_id)
+        self._note_request_station(self._build_station_key(station_name), station_name)
 
         def _get_supersede_meta(phase):
             phase_name = str(phase or "").strip().lower()
@@ -2243,6 +2578,8 @@ class QFBridgeService(xbmc.Monitor):
                     request_ts=req_ts,
                 )
                 self._handle_request(req_id, station, station_id, mode, req_ts)
+
+            self._handle_manual_command()
 
             if self.waitForAbort(0.25):
                 break

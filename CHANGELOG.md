@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-24
+
+- ASM-QF-Version auf `0.1.12` erhoeht.
+- Neue Senderidentifikation (`app/station_identity_trust.py`): Die Kanalkennung wird aus dem Stream-Pfad abgeleitet (Format-/Bitratensegmente wie `mp3-192`, `aac-64`, Playerparameter und Server-Segmente wie `sw282p3` zaehlen nicht). Streams gelten nur bei gleicher Basisdomain und gleichem Kanal als dasselbe Programm; ein gemeinsamer Betreiber oder eine gemeinsame Homepage reicht nicht mehr. Im Zweifel bleiben Kandidaten getrennt.
+- Vertrauensstufen: A = eindeutig, B = wahrscheinlich (weitere Programme moeglich), C = ungeklaert. Ein exakter Namenstreffer gilt als eindeutig, solange es keine gleichnamigen Programme oder regionalen Varianten (`STATION_IDENTITY_REGION_TOKENS`) gibt. Stufe B fuehrt eine zusaetzliche, begrenzte Radio-Browser-Abfrage nach regionalen Geschwistern aus.
+- Automatisch aufgeloeste Sender werden nicht mehr in `station_uuid_map` gespeichert. Neue Tabelle `station_identity_map` (`source_type`, `source_identifier`, `station_name`, `stationuuid`, `identity_status`, `confirmation_source`, `save_preference`, Zeitstempel); Altzeilen werden einmalig (PRAGMA `user_version`) als `legacy_unverified` uebernommen und nie als bestaetigt behandelt. Die alte Tabelle bleibt erhalten.
+- Auswahldialog `qf_selection_dialog.py` (`WindowXMLDialog`, `resources/skins/default/1080i/qf-station-select.xml`): erscheint bei Stufe B/C, laeuft in einem eigenen Thread, fragt pro Wiedergabe nur einmal; Speichern ist standardmaessig aktiv. Abbrechen beendet die Anfrage kontrolliert, ein Senderwechsel verwirft veraltete Dialoge (`app/selection_state.py`).
+- Einstellungen `Senderzuordnung` (`manage.py`, Extension `xbmc.python.script`): aktuellen Sender zuordnen, aktuelle Zuordnung anzeigen, gespeicherte Zuordnungen verwalten/loeschen. Eine ausdruecklich bestaetigte Auswahl hat Vorrang vor der Automatik.
+- Der Verified-Source-Fastpath liefert keine Quelle aus, die zu einem anderen Programm als der bestaetigten Zuordnung gehoert.
+- Neue Logevents: `station_identity_confirmed`, `station_identity_ambiguous`, `station_selection_required/opened/confirmed/cancelled/applied/discarded`, `station_mapping_loaded/saved/invalidated`. Kandidaten-URLs werden ohne Query/Userinfo geloggt.
+- Offline-Tests in `tests/` (`python -m unittest discover -s tests -t .`) mit echten Radio-Browser-Antworten.
+- Bekannte Grenze: Die Zuordnung haengt noch am Sendernamen; pro PVR-Kanal speichern erfordert eine ASM-Erweiterung (PVR-Kanalkennung im Request).
+
 ## 2026-11-23
 
 - ASM-QF-Version auf `0.1.10` erhoeht.

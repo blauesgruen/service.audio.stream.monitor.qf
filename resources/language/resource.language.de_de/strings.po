@@ -18,3 +18,83 @@ msgstr "ASM-QF Bridge aktivieren"
 msgctxt "#32051"
 msgid "Searches the web for official station origin sources (source finder). Can provide additional song metadata."
 msgstr "Wenn deaktiviert, werden Requests mit Status 'blocked' beantwortet."
+
+msgctxt "#32100"
+msgid "ASM-QF - Sender zuordnen"
+msgstr "ASM-QF – Sender zuordnen"
+
+msgctxt "#32101"
+msgid "Several possible programs were found for %s.[CR]Please choose the station you are receiving:"
+msgstr "Für %s wurden mehrere mögliche Programme gefunden.[CR]Bitte wähle den empfangenen Sender:"
+
+msgctxt "#32102"
+msgid "Remember this choice for this station"
+msgstr "Auswahl für diesen Sender speichern"
+
+msgctxt "#32103"
+msgid "Cancel"
+msgstr "Abbrechen"
+
+msgctxt "#32104"
+msgid "Apply"
+msgstr "Übernehmen"
+
+msgctxt "#32110"
+msgid "Station assignment"
+msgstr "Senderzuordnung"
+
+msgctxt "#32111"
+msgid "Assign current station"
+msgstr "Aktuellen Sender zuordnen"
+
+msgctxt "#32112"
+msgid "Show current assignment"
+msgstr "Aktuelle Senderzuordnung anzeigen"
+
+msgctxt "#32113"
+msgid "Manage saved assignments"
+msgstr "Gespeicherte Zuordnungen verwalten"
+
+msgctxt "#32114"
+msgid "No station is playing"
+msgstr "Es läuft kein Sender"
+
+msgctxt "#32115"
+msgid "No candidates found"
+msgstr "Keine Kandidaten gefunden"
+
+msgctxt "#32116"
+msgid "Assignment saved"
+msgstr "Zuordnung gespeichert"
+
+msgctxt "#32117"
+msgid "Assignment deleted"
+msgstr "Zuordnung gelöscht"
+
+msgctxt "#32118"
+msgid "Delete this assignment?"
+msgstr "Diese Zuordnung löschen?"
+
+msgctxt "#32119"
+msgid "No saved assignments"
+msgstr "Keine gespeicherten Zuordnungen"
+
+msgctxt "#32120"
+msgid "Station: %s[CR]Assignment: %s"
+msgstr "Sender: %s[CR]Zuordnung: %s"
+
+msgctxt "#32121"
+msgid "none saved"
+msgstr "keine gespeichert"
+
+msgctxt "#32122"
+msgid "unconfirmed (taken over automatically)"
+msgstr "unbestätigt (automatisch übernommen)"
+
+msgctxt "#32123"
+msgid "confirmed by user"
+msgstr "vom Benutzer bestätigt"
+
+msgctxt "#32124"
+msgid "confirmed technically"
+msgstr "technisch bestätigt"

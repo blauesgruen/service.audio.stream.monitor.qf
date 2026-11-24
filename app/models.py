@@ -45,6 +45,11 @@ class StationMatch:
     raw_record: dict[str, Any] = field(default_factory=dict)
     match_method: str = ""
     match_evidence: list[str] = field(default_factory=list)
+    # Identity trust (see app/station_identity_trust.py): "A" confirmed, "B" probable, "C" undetermined.
+    identity_tier: str = ""
+    identity_confirmation: str = ""  # "user" | "technical" when backed by a stored mapping
+    identity_reasons: list[str] = field(default_factory=list)
+    identity_candidates: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

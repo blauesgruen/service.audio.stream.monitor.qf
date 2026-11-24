@@ -344,3 +344,22 @@ SUPPORTED_PLAYLIST_SUFFIXES = {
     ".pls",
     ".xspf",
 }
+
+# Max. distinct programs offered/logged when a station identity is ambiguous.
+STATION_IDENTITY_MAX_CANDIDATES = 8
+
+# Identity rule (option A): an exactly named program counts as confirmed unless other
+# programs of the same brand exist whose extra name words are regional qualifiers.
+# Small generic qualifier list (no geo database); extend only with generic terms.
+STATION_IDENTITY_REGION_TOKENS = {
+    "baden", "wuerttemberg", "bw", "bayern", "berlin", "brandenburg", "bremen", "hamburg",
+    "hessen", "mecklenburg", "vorpommern", "niedersachsen", "nrw", "nordrhein", "westfalen",
+    "rheinland", "pfalz", "saarland", "sachsen", "anhalt", "schleswig", "holstein", "sh",
+    "thueringen", "nord", "sued", "ost", "west", "mitte", "region", "regional", "lokal",
+    "oesterreich", "schweiz", "austria", "swiss",
+}
+# One bounded extra Radio-Browser request to find regional siblings of an exactly named hit.
+STATION_IDENTITY_SIBLING_LOOKUP_LIMIT = 100
+
+# Max. programs listed in the manual station assignment dialog.
+STATION_IDENTITY_MANUAL_MAX_CANDIDATES = 12
