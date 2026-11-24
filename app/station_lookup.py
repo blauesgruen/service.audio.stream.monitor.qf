@@ -15,6 +15,10 @@ from urllib.parse import quote, unquote, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from .config import (
+    STATION_IDENTITY_MANUAL_MAX_CANDIDATES,
+    STATION_IDENTITY_MAX_CANDIDATES,
+    STATION_IDENTITY_REGION_TOKENS,
+    STATION_IDENTITY_SIBLING_LOOKUP_LIMIT,
     RADIO_BROWSER_LOOKUP_LIMIT,
     RADIO_BROWSER_SEARCH_LOOKUP_LIMIT,
     REQUEST_TIMEOUT_SECONDS,
@@ -39,6 +43,14 @@ from .config import (
     USER_AGENT,
 )
 from .models import StationMatch
+from .station_identity_trust import (
+    TIER_UNDETERMINED,
+    assess_identity,
+    candidate_summary,
+    group_stream_variants,
+    pick_group_representative,
+    redact_url,
+)
 from .utils import (
     decode_text_bytes,
     get_base_domain,
@@ -62,8 +74,11 @@ class StationLookupService:
     _server_cache_expires = 0.0
     _server_cache_lock = threading.Lock()
 
+    IDENTITY_MAX_CANDIDATES = STATION_IDENTITY_MAX_CANDIDATES
+
     def __init__(self, log) -> None:
         self._log = log
+        self._last_candidates: list[StationMatch] = []
 
     @staticmethod
     def _is_dns_failure(errors: list[str]) -> bool:
@@ -140,6 +155,131 @@ class StationLookupService:
         )
 
     def find_best_match(self, query: str, station_id: str = "") -> StationMatch:
+        """Find the best station and rate how safely its program identity is established.
+
+        The result carries identity_tier/identity_reasons/identity_candidates. A tier-B
+        result is only a best guess: callers must not persist it without confirmation.
+        """
+        self._last_candidates = []
+        station = self._find_best_match_untiered(query, station_id=station_id)
+        query_clean = query.strip()
+        if not station.identity_tier:
+            self._apply_identity_assessment(station, query_clean, station_id=station_id)
+        return station
+
+    def _name_tokens_raw(self, value: str) -> set[str]:
+        folded = self._fold_german_umlauts(str(value or "").lower())
+        return {t for t in re.split(r"[^a-z0-9]+", folded) if t}
+
+    def _is_regional_sibling(self, candidate: StationMatch, query: str) -> bool:
+        """Same brand name plus a regional qualifier (e.g. 'RADIO BOB! Hessen' for 'RADIO BOB!')."""
+        query_tokens = self._name_tokens_raw(query) - STATION_LOOKUP_IGNORED_TOKENS
+        cand_tokens = self._name_tokens_raw(candidate.name) - STATION_LOOKUP_IGNORED_TOKENS
+        if not query_tokens or not query_tokens.issubset(cand_tokens):
+            return False
+        extras = cand_tokens - query_tokens
+        return bool(extras & STATION_IDENTITY_REGION_TOKENS)
+
+    def _fetch_sibling_candidates(self, query: str) -> list[StationMatch]:
+        """One bounded Radio-Browser request for same-brand siblings. Errors are non-fatal."""
+        try:
+            lookup_query = (self._build_lookup_queries(query) or [query])[0]
+            for base_url in self._get_server_urls():
+                endpoint = (
+                    f"{base_url}/json/stations/byname/{quote(lookup_query)}"
+                    f"?hidebroken=true&limit={STATION_IDENTITY_SIBLING_LOOKUP_LIMIT}&order=votes&reverse=true"
+                )
+                try:
+                    with urlopen(Request(endpoint, headers={"User-Agent": USER_AGENT}), timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                        return self._extract_candidates(json.load(response))
+                except Exception as err:
+                    self._log(f"Geschwister-Suche fehlgeschlagen ({base_url}): {err}")
+        except Exception as err:
+            self._log(f"Geschwister-Suche nicht moeglich: {err}")
+        return []
+
+    def _apply_identity_assessment(self, station: StationMatch, query: str, station_id: str = "") -> None:
+        exact = self._compact_compare_key(station.name) == self._compact_compare_key(query)
+        pool = [c for c in self._last_candidates if c is not station]
+        if exact and not station_id:
+            known = {(c.stationuuid, c.stream_url) for c in pool}
+            pool.extend(
+                c for c in self._fetch_sibling_candidates(query)
+                if (c.stationuuid, c.stream_url) not in known and c is not station
+            )
+        if not pool:
+            # Web-directory fallbacks etc.: no competing Radio-Browser candidates known.
+            station.identity_tier = "A"
+            station.identity_reasons = ["no_competing_candidates"]
+            station.identity_candidates = [candidate_summary(station)]
+            return
+
+        def plausible(c: StationMatch) -> bool:
+            if self._is_regional_sibling(c, query):
+                return True
+            if exact:
+                # Option A: exact name wins over mere extensions (genre/spin-off channels);
+                # only equally named programs or regional siblings remain competitors.
+                return self._compact_compare_key(c.name) == self._compact_compare_key(query)
+            return self._is_confident_station_match(c, query, station_id=station_id)
+
+        assessment = assess_identity(
+            station, pool, plausible, max_candidates=self.IDENTITY_MAX_CANDIDATES
+        )
+        station.identity_tier = assessment["tier"]
+        station.identity_reasons = assessment["reasons"]
+        if exact and assessment["tier"] == "A":
+            station.identity_reasons = ["exact_name_unique_program"]
+        station.identity_candidates = assessment["candidates"]
+        self._log(
+            "Sender-Identitaet: "
+            f"tier={station.identity_tier} station={station.name} uuid={station.stationuuid} "
+            f"reasons={','.join(station.identity_reasons)} "
+            f"candidates={len(station.identity_candidates)}"
+        )
+
+    def collect_program_candidates(self, query: str, limit: int | None = None) -> list[dict]:
+        """Candidate programs for MANUAL assignment: every distinct program found for the name.
+
+        Unlike the automatic tiers this is not limited to plausible competitors, so the user can
+        also pick a program the automatic search ranked lower. One entry per distinct program.
+        """
+        limit = int(limit or STATION_IDENTITY_MANUAL_MAX_CANDIDATES)
+        query_clean = str(query or "").strip()
+        if not query_clean:
+            return []
+        self._last_candidates = []
+        try:
+            best = self._find_best_match_untiered(query_clean)
+            pool = [best]
+        except StationLookupError as err:
+            if err.error_class not in {"station_ambiguous", "station_not_found"}:
+                raise
+            pool = []
+        pool.extend(self._last_candidates)
+        pool.extend(self._fetch_sibling_candidates(query_clean))
+        relevant = [
+            c for c in self._dedupe_candidates(pool)
+            if c.stationuuid and (
+                self._is_confident_station_match(c, query_clean)
+                or self._is_regional_sibling(c, query_clean)
+                or self._compact_compare_key(c.name) == self._compact_compare_key(query_clean)
+            )
+        ]
+        groups = group_stream_variants(relevant)
+        compact_query = self._compact_compare_key(query_clean)
+        ranked = sorted(
+            groups,
+            key=lambda g: (
+                int(any(self._compact_compare_key(m.name) == compact_query for m in g)),
+                int(any(self._is_regional_sibling(m, query_clean) for m in g)),
+                max(int(m.votes or 0) for m in g),
+            ),
+            reverse=True,
+        )
+        return [candidate_summary(pick_group_representative(g), len(g)) for g in ranked[:limit]]
+
+    def _find_best_match_untiered(self, query: str, station_id: str = "") -> StationMatch:
         query_clean = query.strip()
         if not query_clean:
             raise StationLookupError("Kein Sendername angegeben.")
@@ -211,6 +351,7 @@ class StationLookupService:
             raise StationLookupError(f"Keinen passenden Sender gefunden für '{query_clean}'.", error_class="station_not_found")
 
         deduped = self._dedupe_candidates(collected)
+        self._last_candidates = list(deduped)
         ranked = sorted(deduped, key=lambda station: self._score_station(station, query_clean), reverse=True)
         best = ranked[0]
         strict_candidates = [
@@ -251,6 +392,7 @@ class StationLookupService:
                 if search_candidates:
                     used_search_fallback = True
                     deduped = self._dedupe_candidates([*deduped, *search_candidates])
+                    self._last_candidates = list(deduped)
                     ranked = sorted(deduped, key=lambda station: self._score_station(station, query_clean), reverse=True)
                     best = ranked[0]
                     if self._is_confident_station_match(best, query_clean, station_id=station_id):
@@ -1226,7 +1368,14 @@ class StationLookupService:
         }
 
     def _same_operator_entries(self, stations: list[StationMatch]) -> bool:
-        """True if all stations share one name and one non-empty homepage host."""
+        """True only if all stations are stream variants (format/bitrate) of one program.
+
+        A shared operator/homepage is NOT sufficient: one operator runs several programs.
+        """
+        return len(group_stream_variants(stations)) == 1
+
+    def _same_name_and_homepage(self, stations: list[StationMatch]) -> bool:
+        """Weak operator hint only: one name and one non-empty homepage host. Never proves one program."""
         names = {self._compact_compare_key(s.name) for s in stations}
         hosts = {
             (urlparse(s.homepage or "").hostname or "").lower().removeprefix("www.")
@@ -1268,11 +1417,28 @@ class StationLookupService:
         evaluated.sort(key=lambda item: item[0], reverse=True)
         best_quality = evaluated[0][0]
         tied = [item for item in evaluated if item[0] == best_quality]
+        unproven_same_operator = False
         if len(tied) > 1:
-            # Same name + same operator homepage = duplicate stream entries of one
-            # station; only then may status/votes/bitrate break the tie.
-            same_operator = self._same_operator_entries([station for _, station, _ in tied])
-            if same_operator:
+            tied_stations = [station for _, station, _ in tied]
+            if self._same_operator_entries(tied_stations):
+                # Proven stream variants (format/bitrate) of ONE program: health/votes/bitrate
+                # may break the tie.
+                evidence_tag = "same_program_best_stream_variant"
+            elif self._same_name_and_homepage(tied_stations):
+                # Same name + same homepage, but different streams that cannot be proven to be
+                # one program (may be one station on different CDNs, or several programs of one
+                # operator). Keep the historical best-stream choice, but only as tier B.
+                evidence_tag = "same_operator_program_unproven"
+                unproven_same_operator = True
+            else:
+                evidence_tag = ""
+            if evidence_tag:
+                unproven_candidates = None
+                if unproven_same_operator:
+                    unproven_candidates = [
+                        candidate_summary(pick_group_representative(group), len(group))
+                        for group in group_stream_variants(tied_stations)[: self.IDENTITY_MAX_CANDIDATES]
+                    ]
                 tied.sort(
                     key=lambda item: (
                         int(item[1].lastcheckok or 0),
@@ -1282,33 +1448,33 @@ class StationLookupService:
                     reverse=True,
                 )
                 tied = tied[:1]
-                tied[0][2]["evidence"].append("same_operator_duplicate_best_stream")
+                tied[0][2]["evidence"].append(evidence_tag)
         if len(tied) > 1:
-            candidates = [
-                {
-                    "stationuuid": station.stationuuid,
-                    "name": station.name,
-                    "homepage": station.homepage,
-                    "stream_url": station.stream_url,
-                    "lastcheckok": station.lastcheckok,
-                    "votes": station.votes,
-                    "bitrate": station.bitrate,
-                    "evidence": details["evidence"],
-                }
-                for _, station, details in tied[:5]
-            ]
+            by_group = group_stream_variants([station for _, station, _ in tied])
+            evidence_by_uuid = {station.stationuuid: details["evidence"] for _, station, details in tied}
+            candidates = []
+            for group in by_group[: self.IDENTITY_MAX_CANDIDATES]:
+                rep = pick_group_representative(group)
+                summary = candidate_summary(rep, len(group))
+                summary["evidence"] = evidence_by_uuid.get(rep.stationuuid, [])
+                candidates.append(summary)
             self._log(
                 "Sender mehrdeutig, Kandidaten: "
                 + " | ".join(
                     f"{c['name']} uuid={c['stationuuid']} homepage={c['homepage'] or '-'} "
-                    f"ok={c['lastcheckok']} votes={c['votes']} evidence={','.join(c['evidence'])}"
+                    f"stream={redact_url(c['stream_url'])} variants={c['variants']} "
+                    f"ok={c['lastcheckok']} evidence={','.join(c['evidence'])}"
                     for c in candidates
                 )
             )
             raise StationLookupError(
                 "Mehrere Radio-Browser-Sender passen gleich gut zum Namen.",
                 error_class="station_ambiguous",
-                details={"match_candidates": candidates},
+                details={
+                    "match_candidates": candidates,
+                    "identity_tier": TIER_UNDETERMINED,
+                    "identity_reasons": ["equally_good_distinct_programs"],
+                },
             )
 
         _, station, details = tied[0]
@@ -1318,6 +1484,10 @@ class StationLookupService:
             else "strict_name_tokens"
         )
         station.match_evidence = list(details["evidence"])
+        if unproven_same_operator:
+            station.identity_tier = "B"
+            station.identity_reasons = ["same_name_same_operator_program_unproven"]
+            station.identity_candidates = unproven_candidates or []
         return station
 
     def _has_optional_trailing_region_suffix(

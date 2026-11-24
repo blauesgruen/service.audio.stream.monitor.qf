@@ -51,6 +51,19 @@ Zweck:
 - bevorzugte, verifizierte Quellen fuer den Fastpath in `ASM-QF`
 - Lookup primaer ueber `station_key`, optional ueber konservativen Name-Fallback
 
+Tabelle `station_identity_map` (ab 0.1.12):
+
+- Felder: `source_type`, `source_identifier` (Primaerschluessel), `station_name`, `stationuuid`,
+  `identity_status` (`confirmed`/`unverified`), `confirmation_source` (`user`/`technical`/`legacy_unverified`),
+  `save_preference`, `created_ts`, `updated_ts`
+- aktuell `source_type='name'`, `source_identifier='name:<normalisierter Sendername>'`
+- Altzeilen aus `station_uuid_map` werden einmalig (`PRAGMA user_version`) als `legacy_unverified` kopiert;
+  die alte Tabelle bleibt bestehen. Geloeschte Zeilen kommen nicht zurueck.
+- Nur `user`/`technical` gelten als bestaetigt; `legacy_unverified` wird nie als Zuordnung verwendet.
+- Verwalten/Loeschen: Einstellungen -> Senderzuordnung -> Gespeicherte Zuordnungen verwalten.
+
+`verified_station_sources.meta_json` enthaelt zusaetzlich `identity_uuid`, `identity_tier`, `identity_confirmation`.
+
 ## Beispielabfrage
 
 ```sql
@@ -111,6 +124,9 @@ Wichtige QF-Schalter:
 - `QF_STATION_KEY_NAME_FALLBACK_MAX_CANDIDATES`
 - `QF_SUPERSEDE_PREEMPT_ENABLED`
 - `QF_SUPERSEDE_MIDFLIGHT_ENABLED`
+
+Identitaets-Parameter (ab 0.1.12): `STATION_IDENTITY_MAX_CANDIDATES`, `STATION_IDENTITY_MANUAL_MAX_CANDIDATES`,
+`STATION_IDENTITY_SIBLING_LOOKUP_LIMIT`, `STATION_IDENTITY_REGION_TOKENS`.
 
 ## Betriebshinweise
 
@@ -182,6 +198,16 @@ Wenn Radio-Browser leer ist, nutzt das Tool einen Web-Fallback (z. B. `radio.de`
 Wenn ein stabiler Slug oder eine bekannte Station-ID vorliegt, sollte dieser Wert bevorzugt als `StationId` mitgegeben werden
 (GUI-Hinweisfeld oder `RadioMonitor.QF.Request.StationId` in Kodi). Dann versucht der Lookup zuerst den ID-Pfad
 und kann den Web-Fallback auch direkt auf diesem Wert anwenden.
+
+### 7) Es erscheint ein Dialog "Sender zuordnen" (oder keiner)
+
+- Der Dialog erscheint bei Identitaetsstufe B/C. Log: `station_identity_ambiguous` und `station_selection_required`
+  (Kandidatennamen stehen im Event), danach `station_selection_opened/confirmed/cancelled`.
+- Kein Dialog trotz Mehrdeutigkeit: pruefen, ob der Dialog in dieser Wiedergabe schon beantwortet/abgebrochen wurde
+  (wird nur bei Senderwechsel zurueckgesetzt) oder ob eine bestaetigte Zuordnung existiert (`station_mapping_loaded`).
+- Dialog erscheint leer oder fehlerhaft: `station_selection_failed` bzw. Python-Traceback im Kodi-Log ansehen;
+  nach Aenderungen an `service.py` muss Kodi neu gestartet werden (Dialogmodul wird je Oeffnen neu geladen).
+- Falsche Zuordnung: Einstellungen -> Senderzuordnung -> Aktuellen Sender zuordnen bzw. Eintrag loeschen.
 
 ## Wartung und Erweiterung
 

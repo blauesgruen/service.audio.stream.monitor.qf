@@ -10,5 +10,27 @@
                 </setting>
             </group>
         </category>
+        <category id="assignment" label="32110" help="">
+            <group id="2" label="32110">
+                <setting id="assign_current" type="action" label="32111" help="">
+                    <level>0</level>
+                    <data>RunScript(service.audio.stream.monitor.qf,assign)</data>
+                    <constraints><allowempty>true</allowempty></constraints>
+                    <control type="button" format="action"><close>true</close></control>
+                </setting>
+                <setting id="show_current_assignment" type="action" label="32112" help="">
+                    <level>0</level>
+                    <data>RunScript(service.audio.stream.monitor.qf,show)</data>
+                    <constraints><allowempty>true</allowempty></constraints>
+                    <control type="button" format="action"><close>false</close></control>
+                </setting>
+                <setting id="manage_assignments" type="action" label="32113" help="">
+                    <level>0</level>
+                    <data>RunScript(service.audio.stream.monitor.qf,manage)</data>
+                    <constraints><allowempty>true</allowempty></constraints>
+                    <control type="button" format="action"><close>false</close></control>
+                </setting>
+            </group>
+        </category>
     </section>
 </settings>
