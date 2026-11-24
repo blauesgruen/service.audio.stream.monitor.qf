@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-25
+
+- ASM-QF-Version auf `0.1.13` erhoeht.
+- Manuelle Senderzuordnung ("Aktuellen Sender zuordnen"): `collect_program_candidates` liefert den automatisch gewaehlten Treffer immer zuerst und danach alle Programme mit mindestens zwei gemeinsamen Namensbegriffen, sortiert nach Ueberdeckung. Zuvor blieb die Liste bei Namen mit Zusatzwoertern leer ("keine Kandidaten gefunden", z. B. `STAR FM MAXIMUM ROCK! (Berlin)`).
+
 ## 2026-11-24
 
 - ASM-QF-Version auf `0.1.12` erhoeht.

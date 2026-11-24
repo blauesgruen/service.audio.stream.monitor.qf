@@ -249,30 +249,46 @@ class StationLookupService:
         if not query_clean:
             return []
         self._last_candidates = []
+        best_found = False
         try:
             best = self._find_best_match_untiered(query_clean)
             pool = [best]
+            best_found = True
         except StationLookupError as err:
             if err.error_class not in {"station_ambiguous", "station_not_found"}:
                 raise
             pool = []
         pool.extend(self._last_candidates)
         pool.extend(self._fetch_sibling_candidates(query_clean))
+        best_uuid = pool[0].stationuuid if (pool and best_found) else ""
+        _, query_expanded = self._semantic_name_tokens(query_clean)
+        compact_query = self._compact_compare_key(query_clean)
+
+        def shared_terms(candidate: StationMatch) -> int:
+            primary, _ = self._semantic_name_tokens(candidate.name)
+            return len(primary & query_expanded)
+
+        # Manual assignment is deliberately permissive: the automatic strict match may have
+        # rejected the right program (e.g. extra words in the PVR name), so also offer anything
+        # that shares at least two significant name terms, ranked by overlap.
         relevant = [
             c for c in self._dedupe_candidates(pool)
             if c.stationuuid and (
-                self._is_confident_station_match(c, query_clean)
+                c.stationuuid == best_uuid
+                or self._is_confident_station_match(c, query_clean)
                 or self._is_regional_sibling(c, query_clean)
-                or self._compact_compare_key(c.name) == self._compact_compare_key(query_clean)
+                or self._compact_compare_key(c.name) == compact_query
+                or shared_terms(c) >= 2
             )
         ]
         groups = group_stream_variants(relevant)
-        compact_query = self._compact_compare_key(query_clean)
         ranked = sorted(
             groups,
             key=lambda g: (
+                int(any(m.stationuuid == best_uuid for m in g)),
                 int(any(self._compact_compare_key(m.name) == compact_query for m in g)),
                 int(any(self._is_regional_sibling(m, query_clean) for m in g)),
+                max(shared_terms(m) for m in g),
                 max(int(m.votes or 0) for m in g),
             ),
             reverse=True,
