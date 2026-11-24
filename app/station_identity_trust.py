@@ -36,6 +36,12 @@ _STREAM_EXTENSIONS = (
 _BITRATE_RE = re.compile(r"^(?:24|32|48|56|64|80|96|112|128|160|192|224|256|320)k?$|^\d{2,3}k$")
 
 
+def is_format_token(token: str) -> bool:
+    """Format/bitrate words (mp3, aac, 128k, hd...) carry no program identity."""
+    t = str(token or "").lower()
+    return t in _FORMAT_TOKENS or t in {"hd", "hq", "lq"} or bool(_BITRATE_RE.match(t))
+
+
 def _strip_extension(segment: str) -> str:
     lowered = segment.lower()
     for ext in _STREAM_EXTENSIONS:

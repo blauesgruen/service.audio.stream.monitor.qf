@@ -1,6 +1,13 @@
 # Changelog
 
-## 2026-11-25
+## 2026-11-24
+
+- ASM-QF-Version auf `0.1.14` erhoeht.
+- Identitaetsstufe B auch dann, wenn Woerter des angefragten Namens weder im Namen noch im Stream-Pfad des gewaehlten Senders vorkommen (`query_terms_not_covered`), sofern weitere passende Programme existieren. Der Auswahldialog zeigt dieselbe Kandidatenliste wie die manuelle Zuordnung. Zahlwoerter ("Eins" = 1) sowie Format-/Bitratenwoerter zaehlen nicht als fehlend.
+- Behebt: `STAR FM MAXIMUM ROCK! (Berlin)` wurde als eindeutig (Stufe A) auf `StarFM Berlin` gesetzt, ohne Dialog.
+- Hinweis: Fuer Star FM Berlin liefert der Anbieter-Feed zeitweise keine Songs (nur den Sendernamen); das ist keine Fehlfunktion von ASM-QF.
+
+## 2026-11-24
 
 - ASM-QF-Version auf `0.1.13` erhoeht.
 - Manuelle Senderzuordnung ("Aktuellen Sender zuordnen"): `collect_program_candidates` liefert den automatisch gewaehlten Treffer immer zuerst und danach alle Programme mit mindestens zwei gemeinsamen Namensbegriffen, sortiert nach Ueberdeckung. Zuvor blieb die Liste bei Namen mit Zusatzwoertern leer ("keine Kandidaten gefunden", z. B. `STAR FM MAXIMUM ROCK! (Berlin)`).

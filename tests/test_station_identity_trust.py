@@ -166,6 +166,28 @@ class TierTests(unittest.TestCase):
         self.assertTrue(any("Hessen" in c["name"] for c in result))
         self.assertLessEqual(len(result), 12)
 
+    def _mk(self, name, url, uuid):
+        from app.models import StationMatch
+        return StationMatch(uuid, name, url, "", "Germany", "", "MP3", 128, 10, 1)
+
+    def test_query_terms_missing_in_selected_name_make_it_probable(self):
+        starfm = self._mk("StarFM Berlin", "https://stream.starfm.de/berlin/mp3-192/iradio", "u-berlin")
+        maxrock = self._mk("Star FM Maximum Rock | National", "https://stream.starfm.de/national/mp3-192/iradio", "u-nat")
+        self.lookup._fetch_sibling_candidates = lambda q: []
+        self.lookup._last_candidates = [starfm, maxrock]
+        self.lookup._apply_identity_assessment(starfm, "STAR FM MAXIMUM ROCK! (Berlin)")
+        self.assertEqual(starfm.identity_tier, TIER_PROBABLE)
+        self.assertTrue(starfm.identity_reasons[0].startswith("query_terms_not_covered:"))
+        self.assertEqual(starfm.identity_candidates[0]["stationuuid"], "u-berlin")
+        self.assertIn("u-nat", [c["stationuuid"] for c in starfm.identity_candidates])
+
+    def test_number_words_and_format_tokens_do_not_count_as_uncovered(self):
+        eins = self._mk("Radio Eins", "http://x.de/radioeins/mp3-128", "u1")
+        self.assertEqual(self.lookup._uncovered_query_terms(eins, "Radio Eins"), [])
+        self.assertEqual(self.lookup._uncovered_query_terms(eins, "Radio 1"), [])
+        dlf = self._mk("Deutschlandfunk", "http://x.de/dlf/mp3-128", "u2")
+        self.assertEqual(self.lookup._uncovered_query_terms(dlf, "Deutschlandfunk MP3 128k"), [])
+
     def test_variants_only_gives_confirmed(self):
         metallica = [s for s in _load("radiobrowser_radio_bob.json") if "metallica" in s.name.lower()]
         self._assess("Radio BOB Metallica", metallica[0], metallica)

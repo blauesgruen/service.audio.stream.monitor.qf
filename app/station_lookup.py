@@ -48,6 +48,7 @@ from .station_identity_trust import (
     assess_identity,
     candidate_summary,
     group_stream_variants,
+    is_format_token,
     pick_group_representative,
     redact_url,
 )
@@ -223,6 +224,23 @@ class StationLookupService:
                 return self._compact_compare_key(c.name) == self._compact_compare_key(query)
             return self._is_confident_station_match(c, query, station_id=station_id)
 
+        uncovered = [] if station_id else self._uncovered_query_terms(station, query)
+        if uncovered:
+            ranked = self._rank_program_candidates(
+                [station, *pool], query, station.stationuuid, self.IDENTITY_MAX_CANDIDATES
+            )
+            if len(ranked) > 1:
+                # The selected program lacks words of the requested name (e.g. "Maximum Rock"):
+                # it is only a guess, other programs may fit better.
+                station.identity_tier = "B"
+                station.identity_reasons = ["query_terms_not_covered:" + ",".join(uncovered)]
+                station.identity_candidates = ranked
+                self._log(
+                    "Sender-Identitaet: "
+                    f"tier=B station={station.name} uuid={station.stationuuid} "
+                    f"reasons={','.join(station.identity_reasons)} candidates={len(ranked)}"
+                )
+                return
         assessment = assess_identity(
             station, pool, plausible, max_candidates=self.IDENTITY_MAX_CANDIDATES
         )
@@ -261,22 +279,27 @@ class StationLookupService:
         pool.extend(self._last_candidates)
         pool.extend(self._fetch_sibling_candidates(query_clean))
         best_uuid = pool[0].stationuuid if (pool and best_found) else ""
-        _, query_expanded = self._semantic_name_tokens(query_clean)
-        compact_query = self._compact_compare_key(query_clean)
+        return self._rank_program_candidates(pool, query_clean, best_uuid, limit)
+
+    def _rank_program_candidates(self, pool: list[StationMatch], query: str, best_uuid: str, limit: int) -> list[dict]:
+        """One entry per distinct program: best match first, then by name overlap with the query.
+
+        Deliberately permissive (>=2 shared name terms qualifies): the strict automatic match may
+        have rejected the right program, e.g. because the PVR name has extra words.
+        """
+        _, query_expanded = self._semantic_name_tokens(query)
+        compact_query = self._compact_compare_key(query)
 
         def shared_terms(candidate: StationMatch) -> int:
             primary, _ = self._semantic_name_tokens(candidate.name)
             return len(primary & query_expanded)
 
-        # Manual assignment is deliberately permissive: the automatic strict match may have
-        # rejected the right program (e.g. extra words in the PVR name), so also offer anything
-        # that shares at least two significant name terms, ranked by overlap.
         relevant = [
             c for c in self._dedupe_candidates(pool)
             if c.stationuuid and (
                 c.stationuuid == best_uuid
-                or self._is_confident_station_match(c, query_clean)
-                or self._is_regional_sibling(c, query_clean)
+                or self._is_confident_station_match(c, query)
+                or self._is_regional_sibling(c, query)
                 or self._compact_compare_key(c.name) == compact_query
                 or shared_terms(c) >= 2
             )
@@ -287,13 +310,32 @@ class StationLookupService:
             key=lambda g: (
                 int(any(m.stationuuid == best_uuid for m in g)),
                 int(any(self._compact_compare_key(m.name) == compact_query for m in g)),
-                int(any(self._is_regional_sibling(m, query_clean) for m in g)),
+                int(any(self._is_regional_sibling(m, query) for m in g)),
                 max(shared_terms(m) for m in g),
                 max(int(m.votes or 0) for m in g),
             ),
             reverse=True,
         )
         return [candidate_summary(pick_group_representative(g), len(g)) for g in ranked[:limit]]
+
+    def _uncovered_query_terms(self, station: StationMatch, query: str) -> list[str]:
+        """Query words that appear neither in the station name nor in its stream path."""
+        primary, _ = self._semantic_name_tokens(query)
+        haystack = self._compact_compare_key(f"{station.name} {unquote(urlparse(station.stream_url or '').path)}")
+
+        def covered(token: str) -> bool:
+            if self._compact_compare_key(token) in haystack:
+                return True
+            # Digits may be written as words in the station name ("Radio Eins" for "radio 1").
+            return any(
+                digit == token and self._compact_compare_key(word) in haystack
+                for word, digit in STATION_LOOKUP_NUMBER_TOKEN_MAP.items()
+            )
+
+        return sorted(
+            t for t in primary
+            if t not in STATION_LOOKUP_IGNORED_TOKENS and not is_format_token(t) and not covered(t)
+        )
 
     def _find_best_match_untiered(self, query: str, station_id: str = "") -> StationMatch:
         query_clean = query.strip()
