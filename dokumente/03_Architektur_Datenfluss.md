@@ -134,6 +134,32 @@ Die UI aktualisiert damit gezielt einzelne Felder.
 - Danach merkt sich ASM-QF das zuletzt beendete Paar (`artist/title/source/source_url`) und blockt
   ein identisches Wiederauftauchen fuer `QF_REAPPEAR_BLOCK_SECONDS` (Default 600s).
 
+### Senderidentitaet und Auswahl (ab 0.1.12)
+
+"Sender finden" und "Sender sicher identifizieren" sind getrennt:
+
+- `StationLookupService.find_best_match(...)` liefert zusaetzlich `identity_tier`, `identity_reasons` und
+  `identity_candidates` (`app/station_identity_trust.py`).
+  - **A (eindeutig):** genau ein plausibles Programm, oder ein exakter Namenstreffer ohne gleichnamige
+    Programme und ohne regionale Varianten (`STATION_IDENTITY_REGION_TOKENS`).
+  - **B (wahrscheinlich):** bester Treffer vorhanden, aber weitere Programme moeglich (gleichnamige Eintraege
+    mit nicht belegbar gleichem Stream, regionale Geschwister).
+  - **C (ungeklaert):** gleich gute Programme verschiedener Betreiber; Fehlerklasse `station_ambiguous`.
+- Streams gelten nur als dasselbe Programm, wenn Basisdomain und Kanalschluessel (Stream-Pfad ohne
+  Format-/Bitraten-/Playersegmente) uebereinstimmen. Gemeinsamer Betreiber oder Homepage reicht nicht.
+- Stufe B/C starten **einmal pro Wiedergabe** den Auswahldialog (`qf_selection_dialog.py`) in einem eigenen
+  Thread; der Request wird sofort beantwortet (B: bester Treffer mit `station_selection_required=true`,
+  C: `no_hit`). Die Entscheidung greift ab der naechsten Anfrage. Zustand: `app/selection_state.py`
+  (`pending`/`chosen`/`cancelled`, wird bei Senderwechsel verworfen).
+- Persistiert werden nur Benutzerbestaetigungen (`station_identity_map`). Automatische Ergebnisse nie.
+- Der Verified-Source-Fastpath liefert fuer `name:`-Keys nichts aus, was zu einer anderen UUID als der
+  bestaetigten Zuordnung gehoert (Fastpath-Zustand `resolve_identity_mismatch`, `resolve_selection_cancelled`).
+- Manuelle Zuordnung: Einstellungen -> Senderzuordnung (`manage.py`). Das Script laeuft in einem eigenen
+  Interpreter und spricht ueber `RadioMonitor.QF.Manual.Command` (`assign`, `invalidate:<station_key>`) mit dem Service.
+
+Bekannte Grenze: Der Zuordnungsschluessel ist der Sendername (`name:<norm>`). ASM sendet keine PVR-Kanalkennung;
+pro PVR-Kanal speichern ist erst mit einem neuen Request-Feld moeglich.
+
 ### station_key-Fallback
 
 - Name-Varianten koennen ueber einen konservativen Name-Fallback als kompatibel behandelt werden

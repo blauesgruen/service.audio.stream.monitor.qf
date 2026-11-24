@@ -98,6 +98,9 @@ Kommunikation Worker -> UI erfolgt ausschliesslich ueber `self._results` Queue.
 
 Radio-Browser Match inkl. `raw_record` fuer Rohdatenanzeige.
 
+Identitaetsfelder (ab 0.1.12): `identity_tier` (`A`/`B`/`C`), `identity_confirmation` (`user`/`technical`),
+`identity_reasons`, `identity_candidates` (ein Eintrag je distinktem Programm).
+
 ### `EpgInfo`
 
 - `available`
@@ -121,6 +124,9 @@ Wichtig:
 - akzeptiert den semantischen Fallback nur bei einem eindeutig besten Kandidaten; Gleichstaende liefern `station_ambiguous`
 - Web-Fallback prueft mehrere Slug-Varianten (mit/ohne Bindestrich, mit/ohne `radio`)
 - `find_by_id(...)` akzeptiert echte UUIDs und stabile Slugs; bei Miss kann derselbe Web-Fallback direkt auf der ID greifen
+- `find_best_match(...)` bewertet zusaetzlich die Identitaet (Stufe A/B/C); Stufe B ist nur ein bester Treffer und darf nicht persistiert werden
+- `collect_program_candidates(query)` liefert fuer die manuelle Zuordnung ein Programm je Eintrag (exakt/regional zuerst)
+- gleichnamige Eintraege desselben Programms (Format/Bitrate) werden ueber den Kanalschluessel gruppiert; gleicher Name + gleiche Homepage ohne Beleg ergibt nur Stufe B
 
 ### `StreamResolver` (`app/stream_resolver.py`)
 
@@ -206,6 +212,23 @@ Wichtig:
 
 - kapselt die gemeinsame Stations-Normalisierung und den gemeinsamen Name-First-Lookup mit Station-ID-Fallback fuer GUI und Kodi
 - reduziert Drift zwischen GUI-Lookup, Kodi-DB-Lookup und Cache-/Supersede-Logik
+
+#### `station_identity_trust.py`
+
+- `stream_channel_key(url)`, `same_program_stream(a, b)`, `group_stream_variants(stations)`
+- `assess_identity(selected, candidates, is_plausible)` -> Tier + Kandidaten
+- `redact_url(url)` fuer Logs (ohne Query/Userinfo)
+- reine Logik ohne Kodi/Netzwerk; Tests in `tests/test_station_identity_trust.py`
+
+#### `station_mapping.py`
+
+- `load_mapping`, `save_mapping` (nur `user`/`technical`), `delete_mapping`, `list_mappings`, `is_trusted`
+- einmalige Migration aus `station_uuid_map` ueber `PRAGMA user_version`
+
+#### `selection_state.py`
+
+- `SelectionRegistry`: `on_request`, `begin_pending`, `force_pending`, `choose`, `cancel`, `clear`
+- stellt sicher, dass Polling den Dialog nicht neu oeffnet und veraltete Dialoge verworfen werden
 
 #### `source_policy.py`
 
@@ -507,7 +530,16 @@ Manueller Funktionstest:
 - Modullogik in Modul lassen, GUI nur orchestrieren.
 - Fehlermeldungen fuer User knapp, technische Details ins Live-Log.
 
+## Tests
+
+- Offline-Tests: `python -m unittest discover -s tests -t .` (Fixtures mit echten Radio-Browser-Antworten in `tests/fixtures/`)
+- `service.py` und die Dialogoberflaeche sind ohne Kodi nicht testbar; Service-Logik laesst sich mit Stub-Modulen
+  (`xbmc`, `xbmcgui`, `xbmcaddon`, `xbmcvfs`) pruefen.
+
 ## Dateiindex fuer schnelle Navigation
+
+- `qf_selection_dialog.py`, `manage.py`, `resources/skins/default/1080i/qf-station-select.xml`
+- `app/station_identity_trust.py`, `app/station_mapping.py`, `app/selection_state.py`
 
 - `main.py`
 - `app/gui.py`
